@@ -292,6 +292,11 @@ class ITSStatus:
     total_kwh: int = 0
     comp_total_run_hours: int = 0
     fan_total_run_hours: int = 0
+    # EXPERIMENTAL (issue #5): the KJRH-120L dual heating variant carries a
+    # separate DHW setpoint alongside the Room/Zone-1 setpoint. Only the
+    # KJRH120L profile's dual decode populates this; it stays None on every
+    # other model (including the pure-DHW KJRH-120L) so nothing else is affected.
+    kjrh120l_dhw_setpoint: float | None = None
     raw_body: bytes = field(default_factory=bytes, repr=False)
 
 
@@ -764,6 +769,7 @@ class ILetComfortClient:
         sn8: str | None = None,
         mode: int | None = None,
         temperature: int | None = None,
+        room_temperature: int | None = None,
         boost: bool | None = None,
         mute: int | None = None,
         mute_level: int | None = None,
@@ -788,6 +794,7 @@ class ILetComfortClient:
                 appliance_code,
                 mode=mode,
                 temperature=temperature,
+                room_temperature=room_temperature,
                 power_on=power_on,
             )
 
@@ -868,27 +875,36 @@ class ILetComfortClient:
         *,
         mode: int | None,
         temperature: int | None,
+        room_temperature: int | None = None,
         power_on: bool,
     ) -> dict[str, Any]:
         """Send a KJRH-120L (sn8 17100003) control command (issue #35).
 
         This controller rejects the standard C3 SET frame, so a single captured
         short command is sent directly (no status query, no checksum). One of:
+          - room_temperature → Room/Zone-1 setpoint write (``0008 01 <temp> ff``,
+            EXPERIMENTAL/UNVERIFIED, dual heating variant only — see
+            build_kjrh120l_set_room_temperature, issue #5)
           - temperature → DHW setpoint write (``0007 01 <temp> ff``)
           - power_on / mode→heat → DHW power ON (``00020101ff``)
           - mode→off → DHW power OFF (``00020100ff``)
 
-        The caller (climate entity) has already clamped ``temperature`` to the
-        DHW range. Temperature takes priority over a same-call mode change.
+        The caller (climate / number entity) has already clamped the value to its
+        range. room_temperature takes priority, then temperature, then mode.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
         from .model_profiles import (
             KJRH120L_DHW_OFF,
             KJRH120L_DHW_ON,
+            build_kjrh120l_set_room_temperature,
             build_kjrh120l_set_temperature,
         )
 
-        if temperature is not None:
+        if room_temperature is not None:
+            # EXPERIMENTAL Zone-1 write (field 0x08, unverified) — issue #5.
+            command = build_kjrh120l_set_room_temperature(int(room_temperature))
+            effective = {"effective_room_temp": int(room_temperature)}
+        elif temperature is not None:
             command = build_kjrh120l_set_temperature(int(temperature))
             effective = {"effective_temp": int(temperature)}
         elif power_on or (mode is not None and mode != MODE_OFF):

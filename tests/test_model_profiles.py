@@ -35,10 +35,12 @@ from custom_components.iletcomfort.model_profiles import (
     ModelProfile,
     apply_profile_to_sensors,
     apply_profile_to_status,
+    build_kjrh120l_set_room_temperature,
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_atw_status,
     decode_kjrh120l_status,
+    kjrh120l_has_zone1,
     resolve_profile,
 )
 
@@ -470,6 +472,98 @@ def test_kjrh120l_sensors_temps_suppressed():
     assert out.t1_temp is None
     # raw_body preserved.
     assert out.raw_body == sensors.raw_body
+
+
+# ---------------------------------------------------------------------------
+# KJRH-120L EXPERIMENTAL dual-setpoint variant (DHW + Zone-1, issue #5)
+# ---------------------------------------------------------------------------
+#
+# sn8 17100003 fronts TWO unit types. phillip's pure-DHW water heater
+# (KJRH120L_STATUS_BODY/_ON above) has body[8]==0x00 and body[9]==0x00 and a
+# single setpoint. minoo221's dual heating unit has BOTH a DHW setpoint and a
+# Room/Zone-1 setpoint, and reports body[8]==0x01 AND body[9]==0x01 in every
+# captured state. We treat (body[8]==1 and body[9]==1) as "has Zone-1".
+#
+# minoo221's 3 controlled dual-unit STATUS frames (body[0]=0x01 subtype):
+#   DHW 51 / room 18 → body[12]=0x12=18, body[15]=0x33=51
+#   room 27         → body[12]=0x1b=27, body[15]=0x33=51
+#   room 19         → body[12]=0x13=19, body[15]=0x33=51
+# So Room/Zone-1 setpoint = body[12]; DHW setpoint = body[15]. Power = body[10].
+KJRH120L_DUAL_BODY_R18 = _bytes(
+    "01,fe,00,00,00,41,00,55,01,01,01,02,12,0c,30,33,00,00,00,00"
+)
+KJRH120L_DUAL_BODY_R27 = _bytes(
+    "01,fe,00,00,00,41,00,55,01,01,01,03,1b,1e,30,33,00,00,00,00"
+)
+KJRH120L_DUAL_BODY_R19 = _bytes(
+    "01,fe,00,00,00,41,00,55,01,01,01,02,13,0c,30,33,00,00,00,00"
+)
+_KJRH120L_DUAL_ROOMS = [
+    (KJRH120L_DUAL_BODY_R18, 18),
+    (KJRH120L_DUAL_BODY_R27, 27),
+    (KJRH120L_DUAL_BODY_R19, 19),
+]
+
+
+@pytest.mark.parametrize("body,room", _KJRH120L_DUAL_ROOMS)
+def test_kjrh120l_dual_capability_gate_true(body, room):
+    """The dual unit reports body[8]==1 and body[9]==1 → has Zone-1."""
+    assert kjrh120l_has_zone1(body) is True
+
+
+def test_kjrh120l_pure_dhw_capability_gate_false():
+    """phillip's pure-DHW frames report body[8]==0 and body[9]==0 → no Zone-1."""
+    assert KJRH120L_STATUS_BODY[8] == 0x00
+    assert KJRH120L_STATUS_BODY[9] == 0x00
+    assert KJRH120L_STATUS_BODY_ON[8] == 0x00
+    assert KJRH120L_STATUS_BODY_ON[9] == 0x00
+    assert kjrh120l_has_zone1(KJRH120L_STATUS_BODY) is False
+    assert kjrh120l_has_zone1(KJRH120L_STATUS_BODY_ON) is False
+
+
+@pytest.mark.parametrize("body,room", _KJRH120L_DUAL_ROOMS)
+def test_kjrh120l_dual_decode_room_and_dhw(body, room):
+    """Dual variant: climate target (t5s_def) = Room body[12]; DHW = body[15]=51."""
+    status = decode_kjrh120l_status(body)
+    # Climate target_temperature reads t5s_def → Room/Zone-1 setpoint.
+    assert status.t5s_def == float(room)
+    # DHW setpoint surfaced on the dedicated field the number entity reads.
+    assert status.kjrh120l_dhw_setpoint == 51.0
+    # All 3 captures are power-on (body[10]==1) → mode 1 / Heat.
+    assert status.mode == 1
+    assert status.mode_name == "Heat"
+    assert status.error_code == 0
+    assert status.comp_running is False
+
+
+def test_kjrh120l_pure_dhw_decode_unchanged():
+    """Pure-DHW (gate false): climate target = DHW from body[15]; no Room split."""
+    status = decode_kjrh120l_status(KJRH120L_STATUS_BODY)
+    # Exactly current behavior: t5s_def = DHW setpoint (body[15] = 60).
+    assert status.t5s_def == 60.0
+    assert status.set_temperature == 60
+    # No DHW number entity for the pure-DHW unit: dedicated field stays None.
+    assert status.kjrh120l_dhw_setpoint is None
+    # body[12] (garbage 0x41 for this unit) must NOT leak into the target.
+    assert KJRH120L_STATUS_BODY[12] == 0x41
+    assert status.t5s_def != 65.0
+
+
+def test_kjrh120l_build_set_room_temperature():
+    """EXPERIMENTAL Zone-1 write: field 0x08, 0007→0008. 19 → 000801`13`ff."""
+    assert build_kjrh120l_set_room_temperature(19) == "00080113ff"
+    assert build_kjrh120l_set_room_temperature(27) == "0008011bff"
+    # DHW builder (field 0x07) is unchanged.
+    assert build_kjrh120l_set_temperature(51) == "00070133ff"
+
+
+def test_kjrh120l_dual_profile_applied_to_status_object():
+    """apply_profile_to_status(KJRH120L) re-decodes a dual frame via the layout."""
+    std = decode_its_status(KJRH120L_DUAL_BODY_R19)
+    kjrh = apply_profile_to_status(ModelProfile.KJRH120L, std)
+    assert kjrh.t5s_def == 19.0
+    assert kjrh.kjrh120l_dhw_setpoint == 51.0
+    assert kjrh.mode_name == "Heat"
 
 
 # ---------------------------------------------------------------------------

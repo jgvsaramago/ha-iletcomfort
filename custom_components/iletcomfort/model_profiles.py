@@ -209,6 +209,57 @@ KJRH120L_MODE_ON = 1
 KJRH120L_DHW_SETPOINT_INDEX = 15
 _KJRH120L_MODES = {0: "Off", 1: "Heat", 2: "Cool", 3: "Auto", 4: "Water Pump"}
 
+# ---------------------------------------------------------------------------
+# KJRH-120L EXPERIMENTAL dual-setpoint variant (DHW + Zone-1) — issue #5
+# ---------------------------------------------------------------------------
+#
+# sn8 17100003 fronts TWO physically different unit types that the cloud cannot
+# otherwise distinguish:
+#   * a PURE-DHW water heater (reporter phillip): one setpoint. Its status frames
+#     report body[8]==0x00 and body[9]==0x00. Behavior here is UNCHANGED — the
+#     climate entity is the DHW setpoint, exactly as shipped in v0.8.1.
+#   * a DUAL heating unit (reporter minoo221): has BOTH a DHW setpoint and a
+#     Room/Zone-1 setpoint. Its status frames report body[8]==0x01 AND
+#     body[9]==0x01 in every captured state.
+#
+# CONFIRMED from minoo221's 3 controlled dual-unit diagnostic frames
+# (body[0]=0x01 subtype):
+#   Room/Zone-1 setpoint = body[12]  (0x12=18, 0x1b=27, 0x13=19)
+#   DHW setpoint         = body[15]  (0x33=51, constant across the captures)
+#   Power                = body[10]  (==0x01 / on in all 3 captures)
+# The capability gate (body[8]==1 and body[9]==1) is CONFIRMED constant on the
+# dual unit and false (0/0) on the pure-DHW unit.
+#
+# This is a 2-unit hypothesis; the gate is strict so the pure-DHW path stays
+# byte-for-byte identical when it is false.
+KJRH120L_ZONE1_CAP_INDEX_A = 8
+KJRH120L_ZONE1_CAP_INDEX_B = 9
+KJRH120L_ZONE1_SETPOINT_INDEX = 12
+# Room/Zone-1 setpoint range for the dual heating variant (air-side comfort
+# range). Distinct from the DHW range (KJRH120L_TEMP_MIN/MAX) used by the DHW
+# control and by the pure-DHW climate entity.
+KJRH120L_ROOM_TEMP_MIN = 16
+KJRH120L_ROOM_TEMP_MAX = 30
+# DHW setpoint control range for the dual variant's separate DHW number entity.
+KJRH120L_DHW_TEMP_MIN = 35
+KJRH120L_DHW_TEMP_MAX = 60
+
+
+def kjrh120l_has_zone1(body: bytearray | bytes) -> bool:
+    """Return True if this KJRH-120L frame is the dual (DHW + Zone-1) variant.
+
+    Gate: body[8]==0x01 AND body[9]==0x01 (CONFIRMED constant on minoo221's dual
+    unit; 0/0 on phillip's pure-DHW unit). A frame too short to carry both bytes
+    is treated as pure-DHW (gate false) — the safe default. EXPERIMENTAL, issue
+    #5: a 2-unit hypothesis awaiting on-device validation.
+    """
+    if len(body) <= KJRH120L_ZONE1_CAP_INDEX_B:
+        return False
+    return (
+        body[KJRH120L_ZONE1_CAP_INDEX_A] == 0x01
+        and body[KJRH120L_ZONE1_CAP_INDEX_B] == 0x01
+    )
+
 # Temperature fields suppressed for the KJRH-120L (not exposed by its API).
 _KJRH120L_SUPPRESSED_TEMPS = {
     "t3_temp": None,
@@ -250,10 +301,24 @@ def decode_kjrh120l_status(body: bytearray | bytes) -> ITSStatus:
             status.mode, f"Unknown({status.mode})"
         )
 
-    # DHW setpoint — direct °C value. Surfaced via t5s_def so the climate
-    # entity's target_temperature (t5s_def if not None) shows it; set_temperature
-    # is set too for the SET echo / future DHW-setpoint entity.
-    if body_len > KJRH120L_DHW_SETPOINT_INDEX:
+    # Setpoints. There are two unit variants behind this sn8 (issue #5):
+    #
+    #   PURE-DHW (gate false — body[8]/[9]==0): a single DHW setpoint at body[15].
+    #     UNCHANGED v0.8.1 behavior — surfaced via t5s_def so the climate
+    #     target_temperature shows it; set_temperature set for the SET echo.
+    #
+    #   DUAL (gate true — body[8]==1 and body[9]==1, EXPERIMENTAL): a Room/Zone-1
+    #     setpoint at body[12] AND a DHW setpoint at body[15]. The climate entity
+    #     tracks Room, so t5s_def = body[12]; the separate DHW number entity reads
+    #     kjrh120l_dhw_setpoint = body[15]. set_temperature mirrors Room for the
+    #     SET echo consistency with the pure-DHW path.
+    is_dual = kjrh120l_has_zone1(body)
+    if is_dual and body_len > KJRH120L_DHW_SETPOINT_INDEX:
+        room = body[KJRH120L_ZONE1_SETPOINT_INDEX]
+        status.t5s_def = float(room)
+        status.set_temperature = room
+        status.kjrh120l_dhw_setpoint = float(body[KJRH120L_DHW_SETPOINT_INDEX])
+    elif body_len > KJRH120L_DHW_SETPOINT_INDEX:
         setpoint = body[KJRH120L_DHW_SETPOINT_INDEX]
         status.t5s_def = float(setpoint)
         status.set_temperature = setpoint
@@ -294,6 +359,20 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
     49 → ``00070131ff`` (confirmed captures). No checksum; the cloud frames it.
     """
     return "000701%02xff" % temp
+
+
+def build_kjrh120l_set_room_temperature(temp: int) -> str:
+    """Return the KJRH-120L Room/Zone-1 setpoint write command for ``temp`` °C.
+
+    Shape ``0008 01 <temp as 2-hex-digit byte> ff`` — e.g. 19 → ``00080113ff``.
+
+    ⚠️ EXPERIMENTAL / UNVERIFIED (issue #5): the field byte 0x08 is EXTRAPOLATED
+    from midea_ac_lan conventions (DHW = field 0x07 → Zone-1 = field 0x08). It is
+    NOT confirmed from captured app traffic, unlike the DHW write (0x07). This
+    builder must only be reached on the dual heating variant (gate true) and
+    needs on-device validation by the reporter before it can be trusted.
+    """
+    return "000801%02xff" % temp
 
 
 def apply_profile_to_status(profile: ModelProfile, status: ITSStatus) -> ITSStatus:
@@ -349,15 +428,21 @@ __all__ = [
     "ATW_SN8",
     "KJRH120L_DHW_OFF",
     "KJRH120L_DHW_ON",
+    "KJRH120L_DHW_TEMP_MAX",
+    "KJRH120L_DHW_TEMP_MIN",
+    "KJRH120L_ROOM_TEMP_MAX",
+    "KJRH120L_ROOM_TEMP_MIN",
     "KJRH120L_SN8",
     "KJRH120L_TEMP_MAX",
     "KJRH120L_TEMP_MIN",
     "ModelProfile",
     "apply_profile_to_sensors",
     "apply_profile_to_status",
+    "build_kjrh120l_set_room_temperature",
     "build_kjrh120l_set_temperature",
     "build_query_command",
     "decode_atw_status",
     "decode_kjrh120l_status",
+    "kjrh120l_has_zone1",
     "resolve_profile",
 ]

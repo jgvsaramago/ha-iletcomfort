@@ -350,6 +350,31 @@ def test_set_device_kjrh120l_mode_heat_powers_on():
     assert mock_send.call_args.args == ("APPL1", "00020101ff")
 
 
+def test_set_device_kjrh120l_room_temperature_sends_zone1_command():
+    """EXPERIMENTAL dual variant (#5): room_temperature sends 0008 01 <temp> ff.
+
+    The Zone-1 write field (0x08) is UNVERIFIED — extrapolated from DHW=0x07.
+    """
+    client = _make_client()
+    with patch.object(client, "send_hex_command") as mock_send:
+        client.set_device("APPL1", sn8=KJRH120L_SN8, room_temperature=19)
+
+    assert mock_send.call_count == 1
+    assert mock_send.call_args.args == ("APPL1", "00080113ff")
+
+
+def test_set_device_kjrh120l_room_temperature_takes_priority():
+    """room_temperature wins over temperature in the same call (Zone-1 write)."""
+    client = _make_client()
+    with patch.object(client, "send_hex_command") as mock_send:
+        client.set_device(
+            "APPL1", sn8=KJRH120L_SN8, room_temperature=21, temperature=55
+        )
+
+    assert mock_send.call_count == 1
+    assert mock_send.call_args.args == ("APPL1", "00080115ff")
+
+
 def test_set_device_standard_uses_build_c3_set_frame():
     """STANDARD (unknown/None sn8) keeps the legacy build_c3_set path, unchanged.
 

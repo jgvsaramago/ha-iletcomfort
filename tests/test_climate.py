@@ -173,3 +173,62 @@ def test_kjrh120l_hvac_mode_heat_from_on_frame():
     entity = _climate(KJRH120L_SN8, ITSSensors(), status)
     assert entity.hvac_mode != HVACMode.OFF
     assert entity.hvac_mode == HVACMode.HEAT
+
+
+# --- KJRH-120L EXPERIMENTAL dual variant: climate tracks Room/Zone-1 (#5) ----
+# The dual unit (body[8]==1, body[9]==1) has a Room setpoint (body[12]) and a DHW
+# setpoint (body[15]). The climate entity tracks Room; the DHW number entity
+# tracks DHW. Pure-DHW frames (body[8]/[9]==0) keep the current DHW-climate path.
+_KJRH_DUAL_ROOM19 = bytes(
+    int(x, 16)
+    for x in (
+        "01,fe,00,00,00,41,00,55,01,01,01,02,13,0c,30,33,00,00,00,00"
+    ).split(",")
+)
+
+
+def test_kjrh120l_dual_climate_target_is_room():
+    """Dual variant: climate target_temperature = Room setpoint (body[12]=19)."""
+    status = decode_kjrh120l_status(_KJRH_DUAL_ROOM19)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    assert entity.target_temperature == 19.0
+
+
+def test_kjrh120l_dual_climate_uses_room_range():
+    """Dual variant: climate min/max is the air-side Room range (16–30 °C)."""
+    status = decode_kjrh120l_status(_KJRH_DUAL_ROOM19)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    assert entity.min_temp == 16.0
+    assert entity.max_temp == 30.0
+
+
+def test_kjrh120l_dual_climate_hvac_modes_heat_off_only():
+    """Dual variant: HEAT / OFF only — COOL/FAN_ONLY excluded (dew-point)."""
+    status = decode_kjrh120l_status(_KJRH_DUAL_ROOM19)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT]
+
+
+async def test_kjrh120l_dual_set_temperature_sends_room_command():
+    """Dual variant: setting climate temp sends room_temperature (Zone-1 write)."""
+    status = decode_kjrh120l_status(_KJRH_DUAL_ROOM19)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21})
+    entity.coordinator.async_set_device.assert_awaited_once_with(room_temperature=21)
+
+
+async def test_kjrh120l_pure_dhw_still_sends_dhw_command():
+    """Pure-DHW frame (gate false): climate setpoint still sends temperature."""
+    status = decode_kjrh120l_status(_KJRH_OFF_BODY)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 55})
+    entity.coordinator.async_set_device.assert_awaited_once_with(temperature=55)
+
+
+def test_kjrh120l_pure_dhw_hvac_modes_unchanged():
+    """Pure-DHW frame: full hvac_modes list (no dual gate) — behavior unchanged."""
+    status = decode_kjrh120l_status(_KJRH_OFF_BODY)
+    entity = _climate(KJRH120L_SN8, ITSSensors(), status)
+    assert HVACMode.COOL in entity.hvac_modes
+    assert entity.min_temp == 20.0
+    assert entity.max_temp == 70.0

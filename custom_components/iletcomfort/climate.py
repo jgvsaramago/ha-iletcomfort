@@ -27,9 +27,12 @@ from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
 from .model_profiles import (
+    KJRH120L_ROOM_TEMP_MAX,
+    KJRH120L_ROOM_TEMP_MIN,
     KJRH120L_TEMP_MAX,
     KJRH120L_TEMP_MIN,
     ModelProfile,
+    kjrh120l_has_zone1,
     resolve_profile,
 )
 
@@ -103,6 +106,31 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
         return resolve_profile(self.coordinator.sn8)
 
     @property
+    def _is_kjrh120l_dual(self) -> bool:
+        """True for the EXPERIMENTAL KJRH-120L dual heating variant (issue #5).
+
+        The dual unit (reporter minoo221) exposes BOTH a Room/Zone-1 setpoint and
+        a DHW setpoint; this climate entity then tracks Room, and a separate DHW
+        number entity tracks the tank. False for the pure-DHW KJRH-120L (reporter
+        phillip) and every other model — the climate entity is unchanged there.
+        Gated strictly on the status frame's capability bytes.
+        """
+        if self._profile is not ModelProfile.KJRH120L:
+            return False
+        if self._status is None or not self._status.raw_body:
+            return False
+        return kjrh120l_has_zone1(self._status.raw_body)
+
+    @property
+    def hvac_modes(self) -> list[HVACMode]:
+        # The KJRH-120L dual heating variant supports HEAT / OFF only: the unit
+        # delays/blocks cool valve-switching for dew-point protection and we have
+        # no confirmed cool command, so COOL/FAN_ONLY are excluded here (issue #5).
+        if self._is_kjrh120l_dual:
+            return [HVACMode.OFF, HVACMode.HEAT]
+        return self._attr_hvac_modes
+
+    @property
     def current_temperature(self) -> float | None:
         if self._sensors is None:
             return None
@@ -139,7 +167,11 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
 
     @property
     def min_temp(self) -> float:
-        # KJRH-120L is a DHW heat-pump water heater; its setpoint range sits
+        # KJRH-120L dual variant: this climate tracks the Room/Zone-1 setpoint,
+        # so use the air-side comfort range (issue #5).
+        if self._is_kjrh120l_dual:
+            return float(KJRH120L_ROOM_TEMP_MIN)
+        # Pure-DHW KJRH-120L is a heat-pump water heater; its setpoint range sits
         # above the air-side HEAT range (issue #35).
         if self._profile is ModelProfile.KJRH120L:
             return float(KJRH120L_TEMP_MIN)
@@ -150,6 +182,8 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
 
     @property
     def max_temp(self) -> float:
+        if self._is_kjrh120l_dual:
+            return float(KJRH120L_ROOM_TEMP_MAX)
         if self._profile is ModelProfile.KJRH120L:
             return float(KJRH120L_TEMP_MAX)
         set_mode = _HVAC_TO_SET_MODE.get(self.hvac_mode)
@@ -166,10 +200,18 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is not None:
             # Clamp to the entity's min/max before sending. For the KJRH-120L
-            # this keeps the short DHW-setpoint write inside the valid range;
-            # for other profiles the value is already mode-constrained by HA.
+            # this keeps the short setpoint write inside the valid range; for
+            # other profiles the value is already mode-constrained by HA.
             clamped = max(self.min_temp, min(float(temp), self.max_temp))
-            await self.coordinator.async_set_device(temperature=int(clamped))
+            if self._is_kjrh120l_dual:
+                # Dual variant: the climate entity is the Room/Zone-1 setpoint,
+                # written via the EXPERIMENTAL field-0x08 command (issue #5). The
+                # DHW setpoint is a separate number entity.
+                await self.coordinator.async_set_device(
+                    room_temperature=int(clamped)
+                )
+            else:
+                await self.coordinator.async_set_device(temperature=int(clamped))
 
     async def async_turn_on(self) -> None:
         await self.coordinator.async_set_device(power_on=True)
