@@ -849,6 +849,22 @@ AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW = _bytes(
 )
 AQUAPURA_SPLIT_GREEN_SCHEDULE_BODY = AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW[10:-1]
 
+# Second real capture, taken after switching Temporiz. 1's mode in the app
+# from "ECO" to "Disparo" (everything else left as-is). Diffed against
+# AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW above: the ONLY byte that changed in this
+# 88-byte frame is slot 1's mode marker, raw idx56 = body[46], 0x40 -> 0x80 —
+# proof this one byte (and nothing else) encodes the mode. (raw[9] also read
+# 0x02 here instead of the usual 0x03; unexplained, unconsumed by the decoder.)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_DISPARO_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,8a,07,04,01,80,01,f4,09,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,35"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_DISPARO_BODY = (
+    AQUAPURA_SPLIT_GREEN_SCHEDULE_DISPARO_RAW[10:-1]
+)
+
 
 def test_aquapura_split_green_daily_schedule_matches_app_screenshot():
     """All 4 slots decode to exactly what the "Tempor. diário" screen showed."""
@@ -889,6 +905,26 @@ def test_aquapura_split_green_daily_schedule_disabled_slots_keep_their_config():
     assert slots[1].setpoint == 60.0
     assert slots[1].start_time == "14:00"
     assert slots[1].end_time == "18:00"
+
+
+def test_aquapura_split_green_daily_schedule_disparo_mode():
+    """A real capture with Temporiz. 1 switched to "Disparo" decodes marker 0x80.
+
+    Only the mode changed in the app — this checks the other 3 slots (still
+    ECO) and slot 1's active/setpoint/times are untouched, so the marker byte
+    really is isolated to the mode.
+    """
+    slots = decode_aquapura_split_green_daily_schedule(
+        AQUAPURA_SPLIT_GREEN_SCHEDULE_DISPARO_BODY,
+    )
+
+    assert slots[0] == AquapuraSplitGreenScheduleSlot(
+        active=True, mode="Disparo", setpoint=50.0,
+        start_time="09:00", end_time="21:00",
+    )
+    assert slots[1].mode == "Eco"
+    assert slots[2].mode == "Eco"
+    assert slots[3].mode == "Eco"
 
 
 def test_aquapura_split_green_daily_schedule_short_frame_is_safe():

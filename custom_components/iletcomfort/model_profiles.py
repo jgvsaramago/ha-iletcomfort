@@ -394,13 +394,20 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 # validated against a live screenshot showing all 4 slots (1 enabled, 3
 # disabled, all "ECO"). Each slot is an 8-byte block starting at body[45 + n*8]
 # for slot n (0-indexed):
-#   [0] active (0x00/0x01)   [1] mode marker (0x40 confirmed → "Eco")
+#   [0] active (0x00/0x01)   [1] mode marker (0x40 → "Eco", 0x80 → "Disparo")
 #   [2:4] setpoint, 16-bit BE direct °C ×10 (0x01f4 → 50.0)
 #   [4:6] start HH,MM (direct, e.g. 0x09,0x00 → "09:00")
 #   [6:8] end   HH,MM (direct, e.g. 0x15,0x00 → "21:00", 0x15 = 21)
 # All four slots' active flag, setpoint, start/end time matched the app
 # byte-for-byte, including the three DISABLED slots — their config is present
 # in the frame regardless of the active flag, matching what the app shows.
+# The mode marker was confirmed by a second capture, taken after switching
+# Temporiz. 1's mode in the app from "ECO" to "Disparo": the ONLY byte that
+# changed in the whole 88-byte frame was slot 1's marker, 0x40 -> 0x80 — proof
+# this byte (and only this byte) encodes the mode. That capture's raw[9] was
+# also 0x02 instead of the usual 0x03 (every other frame across every selector
+# has been 0x03); it isn't consumed by extract_c3_body or this decoder and its
+# meaning is unconfirmed — noted here in case it turns out to matter later.
 
 # Query selectors (idx11/idx12 of the frame) captured from the app.
 AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR = (0x01, 0xF4)
@@ -561,10 +568,12 @@ AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT = 4
 # AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE block later.
 AQUAPURA_SPLIT_GREEN_SCHEDULE_FIRST_SLOT_INDEX = 45
 AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE = 8
-# Mode marker byte (slot offset +1) → app label. Only 0x40/"Eco" has been seen
-# (all 4 slots use it in the only capture so far); an unrecognised marker is
-# reported as Unknown(0xNN) rather than guessed.
-_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES = {0x40: "Eco"}
+# Mode marker byte (slot offset +1) → app label. Confirmed by toggling
+# Temporiz. 1's mode in the app and diffing the resulting frame: only that one
+# byte (and nothing else in the slot — setpoint/times/active were untouched)
+# changed 0x40 -> 0x80 when the mode switched "ECO" -> "Disparo". An
+# unrecognised marker is reported as Unknown(0xNN) rather than guessed.
+_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES = {0x40: "Eco", 0x80: "Disparo"}
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
