@@ -27,6 +27,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
+from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -41,6 +42,20 @@ def _s(attr: str) -> Callable[[dict[str, Any]], Any]:
     def _get(data: dict[str, Any]) -> Any:
         sensors = data.get("sensors")
         return getattr(sensors, attr, None) if sensors else None
+    return _get
+
+
+def _schedule_slot(index: int, attr: str) -> Callable[[dict[str, Any]], Any]:
+    """Helper: get an attribute from Aquapura Split Green daily-schedule slot
+    ``index`` (0-based). None if there's no schedule data for this device/poll
+    or the slot index is out of range (e.g. STANDARD-profile devices, which
+    return an empty schedule list).
+    """
+    def _get(data: dict[str, Any]) -> Any:
+        schedule = data.get("schedule")
+        if not schedule or len(schedule) <= index:
+            return None
+        return getattr(schedule[index], attr, None)
     return _get
 
 
@@ -180,6 +195,38 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         value_fn=_s("odu_current"),
+    ),
+    *(
+        description
+        for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
+        for description in (
+            ILetComfortSensorDescription(
+                key=f"daily_schedule_{n}_setpoint",
+                name=f"Daily Schedule {n} Setpoint",
+                native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+                device_class=SensorDeviceClass.TEMPERATURE,
+                state_class=SensorStateClass.MEASUREMENT,
+                value_fn=_schedule_slot(n - 1, "setpoint"),
+            ),
+            ILetComfortSensorDescription(
+                key=f"daily_schedule_{n}_start_time",
+                name=f"Daily Schedule {n} Start Time",
+                icon="mdi:clock-start",
+                value_fn=_schedule_slot(n - 1, "start_time"),
+            ),
+            ILetComfortSensorDescription(
+                key=f"daily_schedule_{n}_end_time",
+                name=f"Daily Schedule {n} End Time",
+                icon="mdi:clock-end",
+                value_fn=_schedule_slot(n - 1, "end_time"),
+            ),
+            ILetComfortSensorDescription(
+                key=f"daily_schedule_{n}_mode",
+                name=f"Daily Schedule {n} Mode",
+                icon="mdi:tune-variant",
+                value_fn=_schedule_slot(n - 1, "mode"),
+            ),
+        )
     ),
 )
 

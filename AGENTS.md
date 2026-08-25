@@ -117,9 +117,10 @@ frames** and reads each data group from a **separate** frame:
 
 `build_aquapura_split_green_query(sel, param)` reproduces all eight captured commands byte-exact.
 `build_query_command` maps `0x01` → selector `01,f4` (STATUS) and `0x02` → `03,84` (**TANK TEMP — note it is
-under selector 0x03, not the standard sensors 0x02**). Other selectors captured but unused:
-`00,00` identity, `00,64` config/limits, `01,90` timers/errors, `02,58`/`02,62` schedule,
-`03,e8` ODU sensors.
+under selector 0x03, not the standard sensors 0x02**). `02,58` (daily schedule) is fetched separately by
+`ILetComfortClient.query_daily_schedule`, gated to this profile (every other/unknown sn8 returns `[]` with
+no network call). Other selectors captured but unused: `00,00` identity, `00,64` config/limits, `01,90`
+timers/errors, `02,62` a *second*, differently-laid-out schedule frame, `03,e8` ODU sensors.
 
 Confirmed against **two** captures — A (tank 49 °C, ambient 21 °C) and B (tank 48 °C, ambient 20 °C),
 both unit OFF, setpoint 50 °C:
@@ -139,6 +140,21 @@ both unit OFF, setpoint 50 °C:
 `_query_aquapura_split_green_sensors` fetches `03,84` then `03,e8` and merges them. The ODU fetch is
 **best-effort** (AuthError still propagates): losing it costs the ambient, while losing the tank temp
 would blank the climate entity and force the cached-data fallback.
+
+**Daily schedule ("Tempor. diário", `02,58`)** — fully decoded and validated byte-for-byte against a
+live app screenshot showing all 4 "Temporiz." slots (1 enabled, 3 disabled, all ECO). Each slot is an
+8-byte block at `body[45 + n*8]` (`decode_aquapura_split_green_daily_schedule`,
+`AquapuraSplitGreenScheduleSlot`): `[active, mode_marker(0x40="Eco"), setpoint_hi, setpoint_lo, start_h,
+start_m, end_h, end_m]`. Disabled slots still carry their real setpoint/times — matches the app, which
+shows a disabled slot's config too. Fetched by a **separate, best-effort** poll
+(`ILetComfortCoordinator._poll` → `client.query_daily_schedule`), stored as `coordinator.data["schedule"]`
+(a `list[AquapuraSplitGreenScheduleSlot]`, `[]` for every other profile — no network call). Surfaced as
+20 entities: `sensor.py` has `Daily Schedule {1..4} {Setpoint,Start Time,End Time,Mode}` (16), and
+`binary_sensor.py` has `Daily Schedule {1..4} Active` (4) — booleans went to `binary_sensor` per the
+existing split (`compressor_running`, `error`, …), not `sensor`. Registered unconditionally for every
+device (matches the KJRH-120L-suppressed-temps precedent): value_fns index into `data["schedule"]` and
+return `None`/`False` when the slot/list is absent, so non-Split-Green devices just show them
+unknown/off rather than needing profile-conditional entity registration.
 
 **Still not decoded:**
 1. **Power/mode**: both captures are from an OFF unit and their STATUS frames are **byte-identical**, so

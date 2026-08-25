@@ -30,8 +30,10 @@ from custom_components.iletcomfort.api import (
 )
 from custom_components.iletcomfort.model_profiles import (
     AQUAPURA_SN8,
-    ATW_SN8,
+    AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT,
     AQUAPURA_SPLIT_GREEN_SN8,
+    ATW_SN8,
+    AquapuraSplitGreenScheduleSlot,
     KJRH120L_DHW_OFF,
     KJRH120L_DHW_ON,
     KJRH120L_SN8,
@@ -44,6 +46,7 @@ from custom_components.iletcomfort.model_profiles import (
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_aquapura_split_green_ambient_temp,
+    decode_aquapura_split_green_daily_schedule,
     decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
     decode_aquapura_split_green_tank_temp,
@@ -831,6 +834,111 @@ def test_query_sensors_aquapura_split_green_survives_odu_failure():
 
     assert sensors.th_temp == 48.7
     assert sensors.t4_temp is None
+
+
+# Real DAILY SCHEDULE (selector 0x02,0x58, "Tempor. diário") response frame,
+# complete as captured. Validated byte-for-byte against a live app screenshot
+# showing all 4 "Temporiz." slots:
+#   1: ON,  ECO, 09:00~21:00, 50°C   2: OFF, ECO, 14:00~18:00, 60°C
+#   3: OFF, ECO, 20:00~23:00, 60°C   4: OFF, ECO, 00:00~07:00, 60°C
+AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,03,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,8a,07,04,01,40,01,f4,09,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,74"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_BODY = AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW[10:-1]
+
+
+def test_aquapura_split_green_daily_schedule_matches_app_screenshot():
+    """All 4 slots decode to exactly what the "Tempor. diário" screen showed."""
+    slots = decode_aquapura_split_green_daily_schedule(
+        AQUAPURA_SPLIT_GREEN_SCHEDULE_BODY,
+    )
+
+    assert len(slots) == AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
+    assert slots[0] == AquapuraSplitGreenScheduleSlot(
+        active=True, mode="Eco", setpoint=50.0,
+        start_time="09:00", end_time="21:00",
+    )
+    assert slots[1] == AquapuraSplitGreenScheduleSlot(
+        active=False, mode="Eco", setpoint=60.0,
+        start_time="14:00", end_time="18:00",
+    )
+    assert slots[2] == AquapuraSplitGreenScheduleSlot(
+        active=False, mode="Eco", setpoint=60.0,
+        start_time="20:00", end_time="23:00",
+    )
+    assert slots[3] == AquapuraSplitGreenScheduleSlot(
+        active=False, mode="Eco", setpoint=60.0,
+        start_time="00:00", end_time="07:00",
+    )
+
+
+def test_aquapura_split_green_daily_schedule_disabled_slots_keep_their_config():
+    """A disabled slot still surfaces its setpoint/time — the app shows it too.
+
+    Temporiz. 2/3/4 are OFF on the screenshot, but the app still displays
+    "ECO | 14:00~18:00 | 60°C" etc. for them, because the config bytes are
+    present in the frame regardless of the active flag.
+    """
+    slots = decode_aquapura_split_green_daily_schedule(
+        AQUAPURA_SPLIT_GREEN_SCHEDULE_BODY,
+    )
+    assert slots[1].active is False
+    assert slots[1].setpoint == 60.0
+    assert slots[1].start_time == "14:00"
+    assert slots[1].end_time == "18:00"
+
+
+def test_aquapura_split_green_daily_schedule_short_frame_is_safe():
+    """A frame too short to carry any slot decodes to 4 all-default slots."""
+    slots = decode_aquapura_split_green_daily_schedule(bytes([0x00, 0x02, 0x58]))
+    assert len(slots) == AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
+    assert all(s == AquapuraSplitGreenScheduleSlot() for s in slots)
+    assert all(s.active is False and s.setpoint is None for s in slots)
+
+
+def test_aquapura_split_green_daily_schedule_unknown_mode_marker():
+    """An unrecognised mode marker reports Unknown(0xNN) rather than "Eco"."""
+    body = bytearray(AQUAPURA_SPLIT_GREEN_SCHEDULE_BODY)
+    body[46] = 0x20  # slot 1's marker byte
+    slots = decode_aquapura_split_green_daily_schedule(bytes(body))
+    assert slots[0].mode == "Unknown(0x20)"
+
+
+def test_build_query_command_aquapura_split_green_schedule_selector():
+    """The 02,58 selector command matches the app's captured schedule fetch."""
+    expected = AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x02, 0x58)]
+    assert build_aquapura_split_green_query(0x02, 0x58) == expected
+
+
+def test_query_daily_schedule_aquapura_split_green_sends_schedule_frame():
+    """query_daily_schedule with the Split Green sn8 sends 02,58 and decodes it."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW.hex()) as send:
+        slots = client.query_daily_schedule("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x02, 0x58)],
+    )
+    assert slots[0].active is True
+    assert slots[0].setpoint == 50.0
+
+
+def test_query_daily_schedule_other_profiles_send_no_command():
+    """Devices without this frame (unknown sn8, or another profile) cost
+
+    nothing: no command is sent and an empty list is returned, since only the
+    Aquapura Split Green has a "Tempor. diário" frame to fetch.
+    """
+    client = _make_client()
+    with patch_send(client, "should never be used") as send:
+        assert client.query_daily_schedule("APPL1", sn8=None) == []
+        assert client.query_daily_schedule("APPL1", sn8=ATW_SN8) == []
+        assert client.query_daily_schedule("APPL1", sn8=KJRH120L_SN8) == []
+
+    send.assert_not_called()
 
 
 def test_aquapura_split_green_set_device_refuses_instead_of_sending_garbage():

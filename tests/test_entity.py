@@ -21,6 +21,7 @@ from custom_components.iletcomfort.const import (
     REGION_US,
 )
 from custom_components.iletcomfort.coordinator import ILetComfortCoordinator
+from custom_components.iletcomfort.model_profiles import AquapuraSplitGreenScheduleSlot
 from custom_components.iletcomfort.select import ILetComfortMuteSelect
 from custom_components.iletcomfort.sensor import (
     SENSOR_DESCRIPTIONS,
@@ -91,3 +92,74 @@ def test_odu_current_sensor_exists_and_reads_scaled_amps(hass: HomeAssistant):
 
     sensor = ILetComfortSensor(coord, desc)
     assert sensor.native_value == 4.0
+
+
+def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):
+    """Daily Schedule N {Setpoint,Start Time,End Time,Mode} read slot N-1."""
+    coord = _coordinator(hass)
+    coord.data["schedule"] = [
+        AquapuraSplitGreenScheduleSlot(
+            active=True, mode="Eco", setpoint=50.0,
+            start_time="09:00", end_time="21:00",
+        ),
+        AquapuraSplitGreenScheduleSlot(
+            active=False, mode="Eco", setpoint=60.0,
+            start_time="14:00", end_time="18:00",
+        ),
+    ]
+
+    def _value(key: str):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        return ILetComfortSensor(coord, desc).native_value
+
+    assert _value("daily_schedule_1_setpoint") == 50.0
+    assert _value("daily_schedule_1_start_time") == "09:00"
+    assert _value("daily_schedule_1_end_time") == "21:00"
+    assert _value("daily_schedule_1_mode") == "Eco"
+    assert _value("daily_schedule_2_setpoint") == 60.0
+    # Slot 3/4 aren't in this poll's data (only 2 supplied above) — must read
+    # None rather than crash on the out-of-range index.
+    assert _value("daily_schedule_3_setpoint") is None
+    assert _value("daily_schedule_4_start_time") is None
+
+
+def test_daily_schedule_sensors_none_without_schedule_data(hass: HomeAssistant):
+    """No schedule key (STANDARD/other profiles) → every field reads None."""
+    coord = _coordinator(hass)
+    assert "schedule" not in coord.data
+
+    desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_setpoint")
+    assert ILetComfortSensor(coord, desc).native_value is None
+
+
+def test_daily_schedule_active_binary_sensors_read_the_named_slot(
+    hass: HomeAssistant,
+):
+    """Daily Schedule N Active reflects slot N-1's active flag."""
+    coord = _coordinator(hass)
+    coord.data["schedule"] = [
+        AquapuraSplitGreenScheduleSlot(active=True),
+        AquapuraSplitGreenScheduleSlot(active=False),
+    ]
+
+    def _is_on(key: str) -> bool:
+        desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == key)
+        return ILetComfortBinarySensor(coord, desc).is_on
+
+    assert _is_on("daily_schedule_1_active") is True
+    assert _is_on("daily_schedule_2_active") is False
+    # Out-of-range / missing slot → False, not a crash.
+    assert _is_on("daily_schedule_3_active") is False
+
+
+def test_daily_schedule_active_binary_sensor_false_without_schedule_data(
+    hass: HomeAssistant,
+):
+    """No schedule key (STANDARD/other profiles) → Active reads False."""
+    coord = _coordinator(hass)
+    assert "schedule" not in coord.data
+
+    desc = next(
+        d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
+    )
+    assert ILetComfortBinarySensor(coord, desc).is_on is False

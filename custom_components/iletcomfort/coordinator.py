@@ -255,9 +255,24 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # current_temperature and Water Inlet sensor read). STANDARD is a no-op.
         sensors = apply_profile_to_sensors(resolve_profile(sn8), sensors, status)
 
+        # Best-effort: only the Aquapura Split Green has a daily-schedule frame
+        # to fetch (query_daily_schedule returns [] with no network call for
+        # every other profile). A failure here is bonus config data, not core
+        # status/sensors, so it stays at DEBUG and never trips the offline
+        # Repair card or a cache-fallback WARNING.
+        try:
+            schedule = await self.hass.async_add_executor_job(
+                self.client.query_daily_schedule, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            schedule = cached.get("schedule") or []
+            _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+
         self._update_offline_repair()
 
-        return {"status": status, "sensors": sensors}
+        return {"status": status, "sensors": sensors, "schedule": schedule}
 
     def _update_offline_repair(self) -> None:
         """Surface or clear the 'device appears offline' Repair card.

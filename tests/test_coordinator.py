@@ -409,6 +409,65 @@ async def test_poll_passes_sn8_and_applies_atw_overrides(hass: HomeAssistant):
     assert result["sensors"].twin_temp != 46.0
 
 
+async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant):
+    """A poll fetches the daily schedule and threads sn8 to it, like status/sensors."""
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    schedule = [object(), object(), object(), object()]
+    client.query_daily_schedule.return_value = schedule
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    client.query_daily_schedule.assert_called_once_with("APPL1", "17186T3A")
+    assert result["schedule"] is schedule
+
+
+async def test_poll_daily_schedule_failure_falls_back_to_cache(hass: HomeAssistant):
+    """A schedule-fetch failure keeps the cached schedule, not an empty one.
+
+    This is bonus config data (not core status/sensors), so it degrades
+    quietly to cache rather than raising or blanking the schedule entities.
+    """
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    cached_schedule = [object()]
+    coord.data = {
+        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": cached_schedule,
+    }
+    client.query_daily_schedule.side_effect = ApiError("code=1214, msg=System error")
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    assert result["schedule"] is cached_schedule
+    # Status/sensors are unaffected by the schedule fetch failing.
+    assert result["status"].mode == 0
+
+
 async def test_poll_standard_leaves_sensors_untouched(hass: HomeAssistant):
     """With no sn8 the poll resolves STANDARD and never rewrites the sensors."""
     entry = _entry(REGION_US)

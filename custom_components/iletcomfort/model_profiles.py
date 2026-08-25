@@ -383,15 +383,30 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 #   - The ODU frame's other sensors (body[43:45], body[19:21] ≈ the tank, etc.)
 #     and the config frame's (0x00,0x64) limit values: real data, but no app
 #     label to validate them against, so they stay unmapped.
+#   - The 02,62 frame: a different, 9-byte-block schedule layout not shown on
+#     any captured screen, so it is left unmapped rather than guessed.
 #   - Writes (setpoint / on-off). No SET command has been captured for this
 #     model, and the standard 62-byte C3 SET frame is built from a status query
 #     this device does not answer — so set_device raises a clear error instead
 #     of sending a frame assembled from garbage (see api.set_device).
+#
+# DAILY SCHEDULE ("Tempor. diário", selector 0x02,0x58) — fully decoded and
+# validated against a live screenshot showing all 4 slots (1 enabled, 3
+# disabled, all "ECO"). Each slot is an 8-byte block starting at body[45 + n*8]
+# for slot n (0-indexed):
+#   [0] active (0x00/0x01)   [1] mode marker (0x40 confirmed → "Eco")
+#   [2:4] setpoint, 16-bit BE direct °C ×10 (0x01f4 → 50.0)
+#   [4:6] start HH,MM (direct, e.g. 0x09,0x00 → "09:00")
+#   [6:8] end   HH,MM (direct, e.g. 0x15,0x00 → "21:00", 0x15 = 21)
+# All four slots' active flag, setpoint, start/end time matched the app
+# byte-for-byte, including the three DISABLED slots — their config is present
+# in the frame regardless of the active flag, matching what the app shows.
 
 # Query selectors (idx11/idx12 of the frame) captured from the app.
 AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR = (0x01, 0xF4)
 AQUAPURA_SPLIT_GREEN_TANK_SELECTOR = (0x03, 0x84)
 AQUAPURA_SPLIT_GREEN_ODU_SELECTOR = (0x03, 0xE8)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR = (0x02, 0x58)
 
 # Which selector serves each of the integration's two polled subtypes.
 _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
@@ -540,6 +555,71 @@ def decode_aquapura_split_green_sensors(
     return dataclasses.replace(ITSSensors(raw_body=bytes(tank_body)), **fields)
 
 
+# Number of "Temporiz. N" slots the app's daily-schedule page shows.
+AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT = 4
+# body[] index of Temporiz. 1's "active" byte; each subsequent slot is one
+# AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE block later.
+AQUAPURA_SPLIT_GREEN_SCHEDULE_FIRST_SLOT_INDEX = 45
+AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE = 8
+# Mode marker byte (slot offset +1) → app label. Only 0x40/"Eco" has been seen
+# (all 4 slots use it in the only capture so far); an unrecognised marker is
+# reported as Unknown(0xNN) rather than guessed.
+_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES = {0x40: "Eco"}
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class AquapuraSplitGreenScheduleSlot:
+    """One Aquapura Split Green daily-timer slot ("Temporiz. N" in the app)."""
+
+    active: bool = False
+    mode: str | None = None
+    setpoint: float | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+
+
+def decode_aquapura_split_green_daily_schedule(
+    body: bytearray | bytes,
+) -> list[AquapuraSplitGreenScheduleSlot]:
+    """Decode the 4 "Tempor. diário" slots from a Split Green 02,58 frame.
+
+    Each 8-byte block at ``body[45 + n*8 : 53 + n*8]`` (slot ``n``, 0-indexed)
+    is ``[active, mode_marker, setpoint_hi, setpoint_lo, start_h, start_m,
+    end_h, end_m]``. Validated byte-for-byte against a live app screenshot
+    showing all 4 slots — including the disabled ones, whose setpoint/time
+    config is present in the frame regardless of the active flag, matching
+    what the app displays for a disabled slot.
+
+    Always returns AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT slots; a slot the
+    frame is too short to carry decodes to all-defaults (inactive/None) rather
+    than raising.
+    """
+    slots: list[AquapuraSplitGreenScheduleSlot] = []
+    for n in range(AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT):
+        start = (
+            AQUAPURA_SPLIT_GREEN_SCHEDULE_FIRST_SLOT_INDEX
+            + n * AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE
+        )
+        if len(body) <= start + AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE - 1:
+            slots.append(AquapuraSplitGreenScheduleSlot())
+            continue
+
+        marker = body[start + 1]
+        setpoint = ((body[start + 2] << 8) | body[start + 3]) / 10
+        slots.append(
+            AquapuraSplitGreenScheduleSlot(
+                active=body[start] != 0,
+                mode=_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES.get(
+                    marker, f"Unknown(0x{marker:02x})",
+                ),
+                setpoint=setpoint,
+                start_time=f"{body[start + 4]:02d}:{body[start + 5]:02d}",
+                end_time=f"{body[start + 6]:02d}:{body[start + 7]:02d}",
+            )
+        )
+    return slots
+
+
 def apply_profile_to_status(profile: ModelProfile, status: ITSStatus) -> ITSStatus:
     """Return the profile-canonical ITSStatus for a decoded status object.
 
@@ -607,9 +687,12 @@ __all__ = [
     "AQUAPURA_SN8",
     "ATW_SN8",
     "AQUAPURA_SPLIT_GREEN_ODU_SELECTOR",
+    "AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR",
+    "AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT",
     "AQUAPURA_SPLIT_GREEN_SN8",
     "AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_TANK_SELECTOR",
+    "AquapuraSplitGreenScheduleSlot",
     "KJRH120L_DHW_OFF",
     "KJRH120L_DHW_ON",
     "KJRH120L_SN8",
@@ -622,6 +705,7 @@ __all__ = [
     "build_kjrh120l_set_temperature",
     "build_query_command",
     "decode_aquapura_split_green_ambient_temp",
+    "decode_aquapura_split_green_daily_schedule",
     "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
     "decode_aquapura_split_green_tank_temp",

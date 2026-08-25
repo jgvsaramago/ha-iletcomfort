@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
+from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -25,6 +26,19 @@ class ILetComfortBinarySensorDescription(BinarySensorEntityDescription):
     """Describe an iLetComfort binary sensor."""
 
     is_on_fn: Any  # Callable[[dict], bool]
+
+
+def _schedule_slot_active(index: int) -> Any:
+    """Helper: is Aquapura Split Green daily-schedule slot ``index`` (0-based)
+    active. False if there's no schedule data for this device/poll or the
+    slot index is out of range (e.g. STANDARD-profile devices).
+    """
+    def _is_on(data: dict[str, Any]) -> bool:
+        schedule = data.get("schedule")
+        if not schedule or len(schedule) <= index:
+            return False
+        return bool(schedule[index].active)
+    return _is_on
 
 
 BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
@@ -51,6 +65,14 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
         is_on_fn=lambda data: (
             data.get("status") is not None and data["status"].error_code != 0
         ),
+    ),
+    *(
+        ILetComfortBinarySensorDescription(
+            key=f"daily_schedule_{n}_active",
+            name=f"Daily Schedule {n} Active",
+            is_on_fn=_schedule_slot_active(n - 1),
+        )
+        for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
     ),
 )
 

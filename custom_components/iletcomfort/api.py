@@ -767,6 +767,31 @@ class ILetComfortClient:
             )
         return decode_its_sensors(body)
 
+    def query_daily_schedule(
+        self, appliance_code: str, sn8: str | None = None,
+    ) -> list[Any]:
+        """Query the Aquapura Split Green's "Tempor. diário" daily schedule.
+
+        Only the Aquapura Split Green (sn8 17186T3A) exposes this frame — every
+        other/unknown sn8 returns an empty list without sending any command, so
+        polling a device that doesn't have this frame costs nothing.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR,
+            ModelProfile,
+            decode_aquapura_split_green_daily_schedule,
+            resolve_profile,
+        )
+
+        if resolve_profile(sn8) is not ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return []
+
+        body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR,
+        )
+        return decode_aquapura_split_green_daily_schedule(body)
+
     def _query_aquapura_split_green_frame(
         self, appliance_code: str, selector: tuple[int, int],
     ) -> bytearray:
