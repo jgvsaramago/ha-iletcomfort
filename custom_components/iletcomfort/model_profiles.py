@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import dataclasses
 from enum import Enum
+from typing import Any
 
 from .api import ITSSensors, ITSStatus
 
@@ -351,20 +352,37 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 # Encodings: the DHW setpoint is a 1-byte direct °C value; live temperatures are
 # 16-bit big-endian tenths (value / 10), with 0x7fff meaning "sensor absent".
 #
-# CONFIRMED against the app (tank 49 °C, ambient 21 °C, OFF, setpoint 50 °C):
+# CONFIRMED against the app across TWO captures — capture A (tank 49 °C,
+# ambient 21 °C) and capture B (tank 48 °C, ambient 20 °C), both with the unit
+# OFF and the setpoint at 50 °C:
 #   STATUS frame (0x01,0xf4): body[27] = DHW setpoint, direct °C (0x32 → 50).
-#   TANK frame  (0x03,0x84):  body[30:32] = tank temp ×10 BE (0x01ec → 49.2).
+#   TANK frame  (0x03,0x84):  body[30:32] = tank temp ×10 BE
+#                             (A 0x01ec → 49.2, B 0x01e7 → 48.7). The value
+#                             moved with the real tank, so this frame is LIVE,
+#                             not cached.
+#   ODU frame   (0x03,0xe8):  body[49:51] = outdoor ambient ×10 BE
+#                             (A 0x00d4 → 21.2, B 0x00d0 → 20.8).
 #
-# DELIBERATELY NOT DECODED (read-only v1 — awaiting a second capture):
-#   - Power/mode. The status frame's candidate flag bytes (body[14]=0x40,
-#     body[15]=0x02, body[16]=0x08, body[20]=0x01) were all captured with the
-#     unit OFF, so none is pinned. mode stays 0/"Off" until a RUNNING capture
-#     shows which byte flips — reporting a guessed mode would be worse than
-#     reporting none.
-#   - Ambient. The ODU frame (0x03,0xe8) carries several 16-bit sensors
-#     (35.3 / 26.8 / 22.3 / 21.2 / 37.8 °C); 21.2 matches the app's ambient, but
-#     which sensor the app labels "ambient" is unconfirmed, so it is not
-#     surfaced.
+# The app TRUNCATES rather than rounds: 49.2→"49", 48.7→"48", 20.8→"20". That
+# rule is what pins the ambient: under it, body[49:51] is the only 16-bit pair in
+# the whole 225-byte ODU frame consistent with both captures (the neighbouring
+# sensors read 32.6/25.3/21.8 °C in capture B, none of which the app could show
+# as 20). We report the true tenths (48.7), not the app's truncation.
+#
+# Because the ambient lives in a THIRD frame, one sensors poll needs two
+# commands for this model — see ILetComfortClient._query_aquapura_split_green_
+# sensors, where the ODU fetch is best-effort so a failure costs the ambient but
+# never the tank temperature.
+#
+# DELIBERATELY NOT DECODED:
+#   - Power/mode. Both captures are from an OFF unit and their STATUS frames are
+#     byte-identical, so the candidate flag bytes (body[14]=0x40, body[15]=0x02,
+#     body[16]=0x08, body[20]=0x01) still cannot be told apart. mode stays
+#     0/"Off" until a RUNNING capture shows which byte flips — reporting a
+#     guessed mode would be worse than reporting none.
+#   - The ODU frame's other sensors (body[43:45], body[19:21] ≈ the tank, etc.)
+#     and the config frame's (0x00,0x64) limit values: real data, but no app
+#     label to validate them against, so they stay unmapped.
 #   - Writes (setpoint / on-off). No SET command has been captured for this
 #     model, and the standard 62-byte C3 SET frame is built from a status query
 #     this device does not answer — so set_device raises a clear error instead
@@ -373,6 +391,7 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 # Query selectors (idx11/idx12 of the frame) captured from the app.
 AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR = (0x01, 0xF4)
 AQUAPURA_SPLIT_GREEN_TANK_SELECTOR = (0x03, 0x84)
+AQUAPURA_SPLIT_GREEN_ODU_SELECTOR = (0x03, 0xE8)
 
 # Which selector serves each of the integration's two polled subtypes.
 _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
@@ -382,6 +401,7 @@ _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
 
 AQUAPURA_SPLIT_GREEN_DHW_SETPOINT_INDEX = 27
 AQUAPURA_SPLIT_GREEN_TANK_TEMP_INDEX = 30
+AQUAPURA_SPLIT_GREEN_AMBIENT_TEMP_INDEX = 49
 # 16-bit sentinel for a sensor that is not present/readable.
 AQUAPURA_SPLIT_GREEN_SENSOR_ABSENT = 0x7FFF
 # Plausibility window for a decoded 16-bit temperature. An all-0xff padded or
@@ -393,10 +413,11 @@ _AQUAPURA_SPLIT_GREEN_TEMP_MAX = 150.0
 # The Split Green's "sensors" fetch returns the TANK frame, which shares no layout
 # with the standard subtype-0x02 sensors frame — every temperature
 # decode_its_sensors produces from it is meaningless. They are nulled so HA
-# shows them unavailable, and the real tank temp is routed to th_temp.
-_AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS = {
+# shows them unavailable, and the real readings are routed to th_temp (tank) and
+# t4_temp (outdoor ambient, from the ODU frame). t4_temp is NOT in this list: it
+# carries a confirmed value that apply_profile_to_sensors must not clobber.
+_AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS: dict[str, Any] = {
     "t3_temp": None,
-    "t4_temp": None,
     "t2_temp": None,
     "t2b_temp": None,
     "twin_temp": None,
@@ -472,9 +493,51 @@ def decode_aquapura_split_green_tank_temp(body: bytearray | bytes) -> float | No
     """Return the DHW tank temperature °C from a Split Green TANK (0x03,0x84) frame.
 
     body[30:32] is the live water temperature as 16-bit big-endian tenths
-    (0x01ec → 49.2 °C, confirmed against the app). None when unavailable.
+    (0x01ec → 49.2 °C, 0x01e7 → 48.7 °C across two captures, both matching the
+    app). None when unavailable.
     """
-    return _aquapura_split_green_temp16(bytes(body), AQUAPURA_SPLIT_GREEN_TANK_TEMP_INDEX)
+    return _aquapura_split_green_temp16(
+        bytes(body), AQUAPURA_SPLIT_GREEN_TANK_TEMP_INDEX,
+    )
+
+
+def decode_aquapura_split_green_ambient_temp(
+    body: bytearray | bytes | None,
+) -> float | None:
+    """Return the outdoor ambient °C from a Split Green ODU (0x03,0xe8) frame.
+
+    body[49:51] is the ambient as 16-bit big-endian tenths (0x00d4 → 21.2 °C,
+    0x00d0 → 20.8 °C across two captures, matching the app's 21 and 20 — the app
+    truncates). None when the frame is missing or unreadable.
+    """
+    if not body:
+        return None
+    return _aquapura_split_green_temp16(
+        bytes(body), AQUAPURA_SPLIT_GREEN_AMBIENT_TEMP_INDEX,
+    )
+
+
+def decode_aquapura_split_green_sensors(
+    tank_body: bytearray | bytes,
+    odu_body: bytearray | bytes | None = None,
+) -> ITSSensors:
+    """Build an ITSSensors from the Split Green's TANK and ODU frames.
+
+    This model splits its readings across two selector frames, so the sensors
+    poll fetches both (see ``ILetComfortClient.query_sensors``). Only the two
+    confirmed values are surfaced — the tank temp on ``th_temp`` ("DHW Tank
+    Temperature", and the climate ``current_temperature`` for this profile) and
+    the outdoor ambient on ``t4_temp`` ("Outdoor Ambient Temperature"). Every
+    other temperature field is nulled: nothing else in these frames is validated
+    against the app, so HA shows those sensors unavailable rather than wrong.
+
+    ``odu_body`` is optional: the ODU fetch is best-effort, and losing it costs
+    only the ambient reading.
+    """
+    fields: dict[str, Any] = dict(_AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS)
+    fields["th_temp"] = decode_aquapura_split_green_tank_temp(tank_body)
+    fields["t4_temp"] = decode_aquapura_split_green_ambient_temp(odu_body)
+    return dataclasses.replace(ITSSensors(raw_body=bytes(tank_body)), **fields)
 
 
 def apply_profile_to_status(profile: ModelProfile, status: ITSStatus) -> ITSStatus:
@@ -522,7 +585,9 @@ def apply_profile_to_sensors(
     - AQUAPURA_SPLIT_GREEN: the "sensors" fetch returns this model's TANK frame
       (selector 0x03,0x84), so the standard temperatures decoded from it are
       meaningless and are nulled; the real tank temp (body[30:32], 16-bit BE
-      tenths) is decoded from that same raw frame into ``th_temp``.
+      tenths) is decoded from that same raw frame into ``th_temp``. ``t4_temp``
+      is left alone — it carries the outdoor ambient from the ODU frame, which
+      ``query_sensors`` fetched separately and this raw body cannot reproduce.
     """
     if profile is ModelProfile.KJRH120L:
         return dataclasses.replace(sensors, **_KJRH120L_SUPPRESSED_TEMPS)
@@ -541,6 +606,7 @@ def apply_profile_to_sensors(
 __all__ = [
     "AQUAPURA_SN8",
     "ATW_SN8",
+    "AQUAPURA_SPLIT_GREEN_ODU_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_SN8",
     "AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_TANK_SELECTOR",
@@ -555,9 +621,11 @@ __all__ = [
     "build_aquapura_split_green_query",
     "build_kjrh120l_set_temperature",
     "build_query_command",
-    "decode_atw_status",
+    "decode_aquapura_split_green_ambient_temp",
+    "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
     "decode_aquapura_split_green_tank_temp",
+    "decode_atw_status",
     "decode_kjrh120l_status",
     "resolve_profile",
 ]

@@ -121,23 +121,33 @@ under selector 0x03, not the standard sensors 0x02**). Other selectors captured 
 `00,00` identity, `00,64` config/limits, `01,90` timers/errors, `02,58`/`02,62` schedule,
 `03,e8` ODU sensors.
 
-Confirmed decode (app showed tank 49 °C, setpoint 50 °C, unit OFF):
+Confirmed against **two** captures — A (tank 49 °C, ambient 21 °C) and B (tank 48 °C, ambient 20 °C),
+both unit OFF, setpoint 50 °C:
 - STATUS body[27] = DHW setpoint, **direct °C** → `t5s_def` / `set_temperature`.
-- TANK body[30:32] = tank temp, **16-bit BE tenths** (`0x01ec` → 49.2) → routed to `th_temp`.
+- TANK body[30:32] = tank temp, **16-bit BE tenths** (A `0x01ec` → 49.2, B `0x01e7` → 48.7) → `th_temp`.
+  The value moved with the real tank, so this frame is **live, not cached**.
+- ODU body[49:51] = outdoor ambient, same encoding (A `0x00d4` → 21.2, B `0x00d0` → 20.8) → `t4_temp`.
+- **The app truncates, it does not round** (49.2→"49", 48.7→"48", 20.8→"20"). That rule is what pins the
+  ambient: under it, body[49:51] is the only 16-bit pair in the 225-byte ODU frame consistent with both
+  captures (neighbours read 32.6/25.3/21.8 °C in B). We surface the true tenths, not the truncation.
 - Frame boilerplate: body[3..11] (raw idx13..21) is identical in every frame. Raw idx21 = `0x15` is a
   **constant, NOT ambient 21 °C** — an early coincidence, ruled out by frame comparison.
 - Live temps use `0x7fff` for "sensor absent"; `_aquapura_split_green_temp16` also rejects implausible
   values so a padded/stub frame reports nothing rather than 6553.5 °C.
 
-**Deliberately not decoded (read-only v1)** — all four need a second capture:
-1. **Power/mode**: the only STATUS capture is from an OFF unit, so the candidate flag bytes
-   (body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) can't be told apart. `mode`
-   stays 0/"Off" until a **RUNNING** capture shows which byte flips.
-2. Whether the `03,84` tank frame is live or cached (re-capture after the temp moves).
-3. Which ODU-frame (`03,e8`) sensor is the app's "ambient" (candidates 35.3/26.8/22.3/21.2/37.8 °C;
-   21.2 matches but is unconfirmed).
-4. **Writes**: no SET command captured. `set_device` **raises a clear ApiError** for this profile
+**Two commands per sensors poll.** The tank and the ambient live in different frames, so
+`_query_aquapura_split_green_sensors` fetches `03,84` then `03,e8` and merges them. The ODU fetch is
+**best-effort** (AuthError still propagates): losing it costs the ambient, while losing the tank temp
+would blank the climate entity and force the cached-data fallback.
+
+**Still not decoded:**
+1. **Power/mode**: both captures are from an OFF unit and their STATUS frames are **byte-identical**, so
+   the candidate flag bytes (body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) still
+   can't be told apart. `mode` stays 0/"Off" until a **RUNNING** capture shows which byte flips.
+2. **Writes**: no SET command captured. `set_device` **raises a clear ApiError** for this profile
    rather than building the legacy 62-byte frame from a status query the device doesn't answer.
+3. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
+   to validate against — left unmapped rather than guessed.
 
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).

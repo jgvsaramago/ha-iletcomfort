@@ -739,12 +739,22 @@ class ILetComfortClient:
 
         ``sn8`` selects the query-command encoding: the KJRH-120L's cloud
         rejects the standard long C3 query frame (code 1214) and needs a short
-        ``ffff<ss><ss><ss>ff`` form. Unknown/None sn8 uses the standard frame.
+        ``ffff<ss><ss><ss>ff`` form. The Aquapura Split Green splits its readings
+        across two selector frames and is handled separately. Unknown/None sn8
+        uses the standard frame.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
-        from .model_profiles import build_query_command, resolve_profile
+        from .model_profiles import (
+            ModelProfile,
+            build_query_command,
+            resolve_profile,
+        )
 
-        command = build_query_command(resolve_profile(sn8), 0x02)
+        profile = resolve_profile(sn8)
+        if profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return self._query_aquapura_split_green_sensors(appliance_code)
+
+        command = build_query_command(profile, 0x02)
         response_hex = self.send_hex_command(appliance_code, command)
         _LOGGER.debug("query_sensors raw response: %s", response_hex)
         raw = parse_hex_response(response_hex)
@@ -756,6 +766,71 @@ class ILetComfortClient:
                 f"unsupported. Raw: {response_hex}"
             )
         return decode_its_sensors(body)
+
+    def _query_aquapura_split_green_frame(
+        self, appliance_code: str, selector: tuple[int, int],
+    ) -> bytearray:
+        """Send one Aquapura Split Green selector query and return its body."""
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import build_aquapura_split_green_query
+
+        command = build_aquapura_split_green_query(*selector)
+        response_hex = self.send_hex_command(appliance_code, command)
+        _LOGGER.debug(
+            "query %02x,%02x raw response: %s",
+            selector[0], selector[1], response_hex,
+        )
+        raw = parse_hex_response(response_hex)
+        _body_type, body = extract_c3_body(raw)
+        return body
+
+    def _query_aquapura_split_green_sensors(
+        self, appliance_code: str,
+    ) -> ITSSensors:
+        """Fetch and merge the Aquapura Split Green's two sensor frames.
+
+        This model spreads its readings across selectors: the tank temperature
+        is in the 03,84 frame and the outdoor ambient in the 03,e8 ODU frame, so
+        one sensors poll costs two commands.
+
+        The ODU fetch is best-effort. Its only confirmed field is the ambient,
+        while the tank temperature backs the climate entity's current
+        temperature — so a failed/echoed ODU frame must not fail the whole poll
+        and push the coordinator onto its cached-data fallback. AuthError still
+        propagates: the coordinator needs it to re-authenticate.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_ODU_SELECTOR,
+            AQUAPURA_SPLIT_GREEN_TANK_SELECTOR,
+            decode_aquapura_split_green_sensors,
+        )
+
+        tank_body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_TANK_SELECTOR,
+        )
+        if len(tank_body) < SENSORS_MIN_BODY_LEN:
+            raise ApiError(
+                f"Tank temperature query returned a truncated frame "
+                f"({len(tank_body)} body bytes); device may be offline or "
+                f"unsupported."
+            )
+
+        odu_body: bytearray | None = None
+        try:
+            odu_body = self._query_aquapura_split_green_frame(
+                appliance_code, AQUAPURA_SPLIT_GREEN_ODU_SELECTOR,
+            )
+        except AuthError:
+            raise
+        except Exception as err:  # noqa: BLE001 - best-effort secondary frame
+            _LOGGER.debug(
+                "Aquapura Split Green ODU frame query failed (%s); outdoor "
+                "ambient will be unavailable this poll",
+                err,
+            )
+
+        return decode_aquapura_split_green_sensors(tank_body, odu_body)
 
     def set_device(
         self,

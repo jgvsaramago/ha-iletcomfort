@@ -43,9 +43,11 @@ from custom_components.iletcomfort.model_profiles import (
     build_aquapura_split_green_query,
     build_kjrh120l_set_temperature,
     build_query_command,
-    decode_atw_status,
+    decode_aquapura_split_green_ambient_temp,
+    decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
     decode_aquapura_split_green_tank_temp,
+    decode_atw_status,
     decode_kjrh120l_status,
     resolve_profile,
 )
@@ -485,8 +487,11 @@ def test_kjrh120l_sensors_temps_suppressed():
 # ---------------------------------------------------------------------------
 #
 # Energie Aquapura Split Green HPWH, KJR-86T3 wired controller. Captured from the
-# official iLetComfort iOS app (v1.7.0) against eu.dollin.net; app state at
-# capture time: tank 49 °C, ambient 21 °C, unit OFF, setpoint 50 °C.
+# official iLetComfort iOS app (v1.7.0) against eu.dollin.net, in two states:
+#   capture A: tank 49 °C, ambient 21 °C   (tank bytes 0x01ec, ambient 0x00d4)
+#   capture B: tank 48 °C, ambient 20 °C   (the full frames pinned below)
+# Both with the unit OFF and the setpoint at 50 °C. The app truncates rather than
+# rounds (48.7 → "48", 20.8 → "20"); we surface the true tenths.
 #
 # This model echoes the standard long C3 query back verbatim (and the KJRH-120L
 # short form too), so the profile has to send the app's 21-byte selector frames
@@ -505,37 +510,53 @@ AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS = {
     (0x03, 0xE8): "aa14c3000000000000030003e8ffffffff00ffff41",  # ODU sensors
 }
 
-# Real STATUS (selector 0x01,0xf4) response frame, complete as captured.
-# The app showed setpoint 50 °C → raw idx37 = body[27] = 0x32.
+# Real STATUS (selector 0x01,0xf4) response frame, complete as captured. The app
+# showed setpoint 50 °C → raw idx37 = body[27] = 0x32. This frame is BYTE-
+# IDENTICAL in captures A and B — both were taken with the unit off, which is
+# why no power/mode byte can be pinned yet.
 AQUAPURA_SPLIT_GREEN_STATUS_RAW = _bytes(
     "aa,2e,c3,00,00,00,00,00,00,03,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
     "00,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
 )
 AQUAPURA_SPLIT_GREEN_STATUS_BODY = AQUAPURA_SPLIT_GREEN_STATUS_RAW[10:-1]
 
+# Real TANK (selector 0x03,0x84) response frame from capture B, complete as
+# captured: raw idx40:41 = 0x01e7 = 48.7 °C, app showed 48.
+AQUAPURA_SPLIT_GREEN_TANK_RAW = _bytes(
+    "aa,3e,c3,00,00,00,00,00,00,03,00,03,84,ff,ff,83,ff,00,ff,ff,ff,15,00,"
+    "00,00,00,00,ff,01,00,01,ff,00,00,00,00,00,ff,ff,ff,01,e7,2f,00,00,00,"
+    "00,00,00,00,00,00,00,00,ff,ff,ff,ff,ff,ff,ff,ff,d7"
+)
+AQUAPURA_SPLIT_GREEN_TANK_BODY = AQUAPURA_SPLIT_GREEN_TANK_RAW[10:-1]
 
-def _aquapura_split_green_tank_frame(tank_tenths: int = 0x01EC) -> bytes:
-    """Build a TANK (selector 0x03,0x84) response frame.
+# Real ODU (selector 0x03,0xe8) response frame from capture B, complete as
+# captured: raw idx59:60 = 0x00d0 = 20.8 °C ambient, app showed 20.
+AQUAPURA_SPLIT_GREEN_ODU_RAW = _bytes(
+    "aa,eb,c3,00,00,00,00,00,00,03,00,03,e8,ff,ff,83,ff,00,ff,ff,ff,0f,ff,"
+    "ff,00,00,00,00,ff,01,e0,ff,ff,ff,ff,00,00,00,00,ff,ff,00,dd,ff,ff,ff,"
+    "ff,00,00,ff,ff,ff,ff,01,46,00,fd,00,da,00,d0,ff,ff,ff,ff,ff,ff,7f,ff,"
+    "7f,ff,7f,ff,ff,ff,ff,ff,ff,ff,00,00,ff,ff,ff,ff,ff,ff,00,32,00,64,7f,"
+    "ff,00,00,00,00,01,7a,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,"
+    "00,00,00,02,00,00,00,02,00,00,00,01,ff,ff,ff,ff,00,ff,ff,ff,00,00,00,"
+    "00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,"
+    "00,00,00,00,00,00,00,35,34,30,4e,41,38,37,30,31,30,31,42,34,31,34,30,"
+    "33,30,30,33,37,33,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,"
+    "00,00,00,00,00,00,00,00,00,56,31,30,00,00,00,00,00,00,00,00,00,00,00,"
+    "00,00,ff,ff,00,00,0f"
+)
+AQUAPURA_SPLIT_GREEN_ODU_BODY = AQUAPURA_SPLIT_GREEN_ODU_RAW[10:-1]
 
-    Only the confirmed parts of the capture are real: the C3 header, the
-    per-frame boilerplate at raw idx13..21 (identical in every Split Green frame), the
-    second reading at raw idx28:29 (0x0100) and the tank temperature at raw
-    idx40:41 — 0x01ec = 49.2 °C, matching the 49 °C the app showed. The rest of
-    the frame was not captured byte-for-byte and is 0xff padding here.
+
+def _aquapura_split_green_tank_frame(tank_tenths: int) -> bytes:
+    """Return the real TANK frame with the temperature bytes overwritten.
+
+    Used to exercise readings we have no capture for (the earlier 49.2 °C, the
+    0x7fff sensor-absent sentinel); everything around them stays as captured.
     """
-    frame = bytearray(b"\xff" * 63)
-    frame[0:3] = bytes([0xAA, 0x3E, 0xC3])
-    frame[3:9] = bytes(6)
-    frame[9:13] = bytes([0x03, 0x00, 0x03, 0x84])
-    frame[13:22] = bytes([0xFF, 0xFF, 0x83, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x15])
-    frame[28:30] = bytes([0x01, 0x00])
+    frame = bytearray(AQUAPURA_SPLIT_GREEN_TANK_RAW)
     frame[40:42] = tank_tenths.to_bytes(2, "big")
     frame[62] = (~sum(frame[1:62]) + 1) & 0xFF
     return bytes(frame)
-
-
-AQUAPURA_SPLIT_GREEN_TANK_RAW = _aquapura_split_green_tank_frame()
-AQUAPURA_SPLIT_GREEN_TANK_BODY = AQUAPURA_SPLIT_GREEN_TANK_RAW[10:-1]
 
 
 def test_resolve_profile_aquapura_split_green_sn8():
@@ -643,11 +664,42 @@ def test_aquapura_split_green_profile_applied_to_status_object():
 
 
 def test_aquapura_split_green_tank_temp_is_16bit_tenths():
-    """body[30:32] = 0x01ec → 49.2 °C (app showed 49)."""
-    assert decode_aquapura_split_green_tank_temp(AQUAPURA_SPLIT_GREEN_TANK_BODY) == 49.2
-    # Tracks the bytes, not the one capture: 0x0226 → 55.0 °C.
+    """body[30:32] = 0x01e7 → 48.7 °C (capture B; the app truncated it to 48)."""
+    assert decode_aquapura_split_green_tank_temp(AQUAPURA_SPLIT_GREEN_TANK_BODY) == 48.7
+    # Tracks the bytes, not one capture: 0x0226 → 55.0 °C.
     warmer = _aquapura_split_green_tank_frame(0x0226)[10:-1]
     assert decode_aquapura_split_green_tank_temp(warmer) == 55.0
+
+
+def test_aquapura_split_green_tank_frame_is_live_not_cached():
+    """The tank bytes moved between captures, tracking the real tank.
+
+    Capture A read 0x01ec (49.2 °C, app 49) and capture B 0x01e7 (48.7 °C, app
+    48) at the same offset — so the 03,84 frame is live and worth polling, not a
+    static/cached frame like the KJRH-120L's sensors response.
+    """
+    capture_a = _aquapura_split_green_tank_frame(0x01EC)[10:-1]
+    assert decode_aquapura_split_green_tank_temp(capture_a) == 49.2
+    assert decode_aquapura_split_green_tank_temp(AQUAPURA_SPLIT_GREEN_TANK_BODY) == 48.7
+
+
+def test_aquapura_split_green_ambient_temp_from_odu_frame():
+    """ODU body[49:51] = 0x00d0 → 20.8 °C (capture B; the app showed 20).
+
+    Pinned by two captures plus the app's truncation rule: capture A read 0x00d4
+    (21.2 °C, app 21). Under truncation this is the only 16-bit pair in the whole
+    frame consistent with both readings — its neighbours are 32.6/25.3/21.8 °C.
+    """
+    assert decode_aquapura_split_green_ambient_temp(
+        AQUAPURA_SPLIT_GREEN_ODU_BODY
+    ) == 20.8
+
+
+def test_aquapura_split_green_ambient_temp_missing_frame_is_none():
+    """No ODU frame (best-effort fetch failed) → no ambient, not a crash."""
+    assert decode_aquapura_split_green_ambient_temp(None) is None
+    assert decode_aquapura_split_green_ambient_temp(b"") is None
+    assert decode_aquapura_split_green_ambient_temp(b"\xff" * 60) is None
 
 
 def test_aquapura_split_green_tank_temp_absent_or_implausible_is_none():
@@ -659,20 +711,19 @@ def test_aquapura_split_green_tank_temp_absent_or_implausible_is_none():
     assert decode_aquapura_split_green_tank_temp(b"\x00\x01\xf4") is None
 
 
-def test_aquapura_split_green_sensors_route_tank_temp_to_th_temp():
-    """The tank temp reaches th_temp; the tank frame's fake temps are nulled.
+def test_aquapura_split_green_sensors_merge_tank_and_odu():
+    """The two frames merge into tank → th_temp and ambient → t4_temp.
 
-    The Split Green's "sensors" fetch returns the TANK frame, whose layout has nothing
-    to do with the standard subtype-0x02 sensors frame — every temperature
-    decode_its_sensors derives from it is meaningless and must not reach HA.
+    Everything else is nulled: nothing else in these frames is validated against
+    the app, so those entities stay unavailable rather than showing a guess.
     """
-    sensors = decode_its_sensors(bytearray(AQUAPURA_SPLIT_GREEN_TANK_BODY))
-    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
-    out = apply_profile_to_sensors(ModelProfile.AQUAPURA_SPLIT_GREEN, sensors, status)
+    out = decode_aquapura_split_green_sensors(
+        AQUAPURA_SPLIT_GREEN_TANK_BODY, AQUAPURA_SPLIT_GREEN_ODU_BODY,
+    )
 
-    assert out.th_temp == 49.2
+    assert out.th_temp == 48.7
+    assert out.t4_temp == 20.8
     assert out.t3_temp is None
-    assert out.t4_temp is None
     assert out.t2_temp is None
     assert out.t2b_temp is None
     assert out.twin_temp is None
@@ -680,8 +731,50 @@ def test_aquapura_split_green_sensors_route_tank_temp_to_th_temp():
     assert out.t1_temp is None
     assert out.tf_temp is None
     assert out.tp_temp is None
-    # raw_body preserved.
-    assert out.raw_body == sensors.raw_body
+    # The tank frame is kept as raw_body (diagnostics / SENSORS RAW log).
+    assert out.raw_body == bytes(AQUAPURA_SPLIT_GREEN_TANK_BODY)
+
+
+def test_aquapura_split_green_sensors_without_odu_keep_tank_temp():
+    """A failed ODU fetch costs the ambient only — the tank temp still arrives."""
+    out = decode_aquapura_split_green_sensors(AQUAPURA_SPLIT_GREEN_TANK_BODY)
+    assert out.th_temp == 48.7
+    assert out.t4_temp is None
+
+
+def test_apply_profile_to_sensors_preserves_aquapura_split_green_ambient():
+    """The coordinator's profile pass must not clobber the ODU-sourced ambient.
+
+    apply_profile_to_sensors re-derives th_temp from raw_body (the tank frame),
+    which cannot carry the ambient — so t4_temp has to survive untouched.
+    """
+    sensors = decode_aquapura_split_green_sensors(
+        AQUAPURA_SPLIT_GREEN_TANK_BODY, AQUAPURA_SPLIT_GREEN_ODU_BODY,
+    )
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    out = apply_profile_to_sensors(ModelProfile.AQUAPURA_SPLIT_GREEN, sensors, status)
+
+    assert out.t4_temp == 20.8
+    assert out.th_temp == 48.7
+    assert out.twin_temp is None
+
+
+def test_aquapura_split_green_standard_sensor_decode_is_suppressed():
+    """A STANDARD-decoded tank frame still gets scrubbed by the profile pass.
+
+    Guards the cached/legacy path: whatever decode_its_sensors invents from the
+    tank frame must not reach HA.
+    """
+    sensors = decode_its_sensors(bytearray(AQUAPURA_SPLIT_GREEN_TANK_BODY))
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    out = apply_profile_to_sensors(ModelProfile.AQUAPURA_SPLIT_GREEN, sensors, status)
+
+    assert out.th_temp == 48.7
+    assert out.t3_temp is None
+    assert out.twin_temp is None
+    assert out.twout_temp is None
+    assert out.tf_temp is None
+    assert out.tp_temp is None
 
 
 def test_query_status_aquapura_split_green_sends_selector_frame_and_decodes():
@@ -690,21 +783,54 @@ def test_query_status_aquapura_split_green_sends_selector_frame_and_decodes():
     with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_RAW.hex()) as send:
         status = client.query_status("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
 
-    send.assert_called_once_with("APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0xF4)])
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0xF4)],
+    )
     assert status.t5s_def == 50.0
     assert status.set_temperature == 50
     assert status.error_code == 0
 
 
-def test_query_sensors_aquapura_split_green_sends_tank_frame():
-    """query_sensors with the Split Green sn8 sends the 03,84 tank-temperature frame."""
+def test_query_sensors_aquapura_split_green_fetches_tank_and_odu_frames():
+    """One sensors poll sends both 03,84 (tank) and 03,e8 (ODU/ambient)."""
     client = _make_client()
-    with patch_send(client, AQUAPURA_SPLIT_GREEN_TANK_RAW.hex()) as send:
+    responses = {
+        AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)]:
+            AQUAPURA_SPLIT_GREEN_TANK_RAW.hex(),
+        AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0xE8)]:
+            AQUAPURA_SPLIT_GREEN_ODU_RAW.hex(),
+    }
+    with patch_send_per_command(client, responses) as send:
         sensors = client.query_sensors("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
 
-    send.assert_called_once_with("APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)])
-    # The profile override (applied by the coordinator) turns this into th_temp.
-    assert decode_aquapura_split_green_tank_temp(sensors.raw_body) == 49.2
+    sent = [call.args[1] for call in send.call_args_list]
+    assert sent == [
+        AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)],
+        AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0xE8)],
+    ]
+    assert sensors.th_temp == 48.7
+    assert sensors.t4_temp == 20.8
+
+
+def test_query_sensors_aquapura_split_green_survives_odu_failure():
+    """The ODU frame is best-effort: its failure must not cost the tank temp.
+
+    Losing the tank temperature would blank the climate entity's current
+    temperature and push the coordinator onto cached data — too high a price for
+    a missing ambient reading.
+    """
+    client = _make_client()
+
+    def _send(_appliance_code, command):
+        if command == AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)]:
+            return AQUAPURA_SPLIT_GREEN_TANK_RAW.hex()
+        raise ApiError("Send command failed: code=1214")
+
+    with patch_send_callable(client, _send):
+        sensors = client.query_sensors("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    assert sensors.th_temp == 48.7
+    assert sensors.t4_temp is None
 
 
 def test_aquapura_split_green_set_device_refuses_instead_of_sending_garbage():
@@ -787,3 +913,16 @@ def patch_send(client, return_value):
     from unittest.mock import patch
 
     return patch.object(client, "send_hex_command", return_value=return_value)
+
+
+def patch_send_per_command(client, responses: dict[str, str]):
+    """Patch send_hex_command to answer each command hex with its own response."""
+    return patch_send_callable(
+        client, lambda _appliance_code, command: responses[command],
+    )
+
+
+def patch_send_callable(client, side_effect):
+    from unittest.mock import patch
+
+    return patch.object(client, "send_hex_command", side_effect=side_effect)
