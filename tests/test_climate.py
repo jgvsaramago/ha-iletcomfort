@@ -2,10 +2,11 @@
 
 The climate card's ``current_temperature`` is profile-aware (issues #22, #12):
 - STANDARD reads ``sensors.twin_temp`` (the real water-inlet reading), unchanged.
-- ATW / AQUAPURA have no real inlet reading; the meaningful "current" value is
-  the DHW tank temperature, which the model profiles surface on ``th_temp``. The
-  climate entity returns ``th_temp`` for those profiles so the card still shows a
-  useful number while the "Water Inlet Temperature" sensor stays honest.
+- ATW / AQUAPURA / AQUAPURA_SPLIT_GREEN have no real inlet reading; the meaningful
+  "current" value is the DHW tank temperature, which the model profiles surface
+  on ``th_temp``. The climate entity returns ``th_temp`` for those profiles so
+  the card still shows a useful number while the "Water Inlet Temperature"
+  sensor stays honest.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from homeassistant.components.climate import HVACMode
 from custom_components.iletcomfort.model_profiles import (
     ATW_SN8,
     AQUAPURA_SN8,
+    AQUAPURA_SPLIT_GREEN_SN8,
     KJRH120L_SN8,
     decode_kjrh120l_status,
 )
@@ -57,6 +59,13 @@ def test_current_temperature_aquapura_reads_th_temp():
     sensors = ITSSensors(twin_temp=0.0, th_temp=40.0)
     entity = _climate(AQUAPURA_SN8, sensors)
     assert entity.current_temperature == 40.0
+
+
+def test_current_temperature_aquapura_split_green_reads_th_temp():
+    """AQUAPURA_SPLIT_GREEN returns the tank temp decoded from its own tank frame."""
+    sensors = ITSSensors(twin_temp=None, th_temp=49.2)
+    entity = _climate(AQUAPURA_SPLIT_GREEN_SN8, sensors)
+    assert entity.current_temperature == 49.2
 
 
 def test_current_temperature_none_when_no_sensors():

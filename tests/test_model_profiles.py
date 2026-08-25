@@ -12,6 +12,9 @@ These tests pin:
 - AQUAPURA (sn8 ``171000AU``, issue #12): tank temp sourced from
   ``status.box_bottom_temp`` and surfaced on ``th_temp`` (the "DHW Tank
   Temperature" sensor) instead of ``sensors.twin_temp``.
+- AQUAPURA_SPLIT_GREEN (sn8 ``17186T3A``): the app's 21-byte selector query frames
+  (this model echoes the standard query back verbatim), the setpoint at
+  status body[27] and the tank temp at tank-frame body[30:32].
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 from custom_components.iletcomfort.api import (
+    ApiError,
     ILetComfortClient,
     build_c3_query,
     decode_its_sensors,
@@ -27,6 +31,7 @@ from custom_components.iletcomfort.api import (
 from custom_components.iletcomfort.model_profiles import (
     AQUAPURA_SN8,
     ATW_SN8,
+    AQUAPURA_SPLIT_GREEN_SN8,
     KJRH120L_DHW_OFF,
     KJRH120L_DHW_ON,
     KJRH120L_SN8,
@@ -35,9 +40,12 @@ from custom_components.iletcomfort.model_profiles import (
     ModelProfile,
     apply_profile_to_sensors,
     apply_profile_to_status,
+    build_aquapura_split_green_query,
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_atw_status,
+    decode_aquapura_split_green_status,
+    decode_aquapura_split_green_tank_temp,
     decode_kjrh120l_status,
     resolve_profile,
 )
@@ -470,6 +478,247 @@ def test_kjrh120l_sensors_temps_suppressed():
     assert out.t1_temp is None
     # raw_body preserved.
     assert out.raw_body == sensors.raw_body
+
+
+# ---------------------------------------------------------------------------
+# Aquapura Split Green decode + query commands (sn8 17186T3A)
+# ---------------------------------------------------------------------------
+#
+# Energie Aquapura Split Green HPWH, KJR-86T3 wired controller. Captured from the
+# official iLetComfort iOS app (v1.7.0) against eu.dollin.net; app state at
+# capture time: tank 49 °C, ambient 21 °C, unit OFF, setpoint 50 °C.
+#
+# This model echoes the standard long C3 query back verbatim (and the KJRH-120L
+# short form too), so the profile has to send the app's 21-byte selector frames
+# and read each data group from its own frame — hence the query-command tests
+# below as well as the decode tests.
+
+# The eight query commands captured from the app: (selector, param) → command.
+AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS = {
+    (0x00, 0x00): "aa14c300000000000003000000ffffffff00ffff2c",  # identity
+    (0x00, 0x64): "aa14c300000000000003000064ffffffff00ffffc8",  # config/limits
+    (0x01, 0xF4): "aa14c3000000000000030001f4ffffffff00ffff37",  # STATUS
+    (0x01, 0x90): "aa14c300000000000003000190ffffffff00ffff9b",  # timers/errors
+    (0x02, 0x58): "aa14c300000000000003000258ffffffff00ffffd2",  # schedule A
+    (0x02, 0x62): "aa14c300000000000003000262ffffffff00ffffc8",  # schedule B
+    (0x03, 0x84): "aa14c300000000000003000384ffffffff00ffffa5",  # TANK TEMP
+    (0x03, 0xE8): "aa14c3000000000000030003e8ffffffff00ffff41",  # ODU sensors
+}
+
+# Real STATUS (selector 0x01,0xf4) response frame, complete as captured.
+# The app showed setpoint 50 °C → raw idx37 = body[27] = 0x32.
+AQUAPURA_SPLIT_GREEN_STATUS_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,03,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "00,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_BODY = AQUAPURA_SPLIT_GREEN_STATUS_RAW[10:-1]
+
+
+def _aquapura_split_green_tank_frame(tank_tenths: int = 0x01EC) -> bytes:
+    """Build a TANK (selector 0x03,0x84) response frame.
+
+    Only the confirmed parts of the capture are real: the C3 header, the
+    per-frame boilerplate at raw idx13..21 (identical in every Split Green frame), the
+    second reading at raw idx28:29 (0x0100) and the tank temperature at raw
+    idx40:41 — 0x01ec = 49.2 °C, matching the 49 °C the app showed. The rest of
+    the frame was not captured byte-for-byte and is 0xff padding here.
+    """
+    frame = bytearray(b"\xff" * 63)
+    frame[0:3] = bytes([0xAA, 0x3E, 0xC3])
+    frame[3:9] = bytes(6)
+    frame[9:13] = bytes([0x03, 0x00, 0x03, 0x84])
+    frame[13:22] = bytes([0xFF, 0xFF, 0x83, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x15])
+    frame[28:30] = bytes([0x01, 0x00])
+    frame[40:42] = tank_tenths.to_bytes(2, "big")
+    frame[62] = (~sum(frame[1:62]) + 1) & 0xFF
+    return bytes(frame)
+
+
+AQUAPURA_SPLIT_GREEN_TANK_RAW = _aquapura_split_green_tank_frame()
+AQUAPURA_SPLIT_GREEN_TANK_BODY = AQUAPURA_SPLIT_GREEN_TANK_RAW[10:-1]
+
+
+def test_resolve_profile_aquapura_split_green_sn8():
+    """The Aquapura Split Green sn8 (17186T3A) resolves to its own profile."""
+    assert AQUAPURA_SPLIT_GREEN_SN8 == "17186T3A"
+    assert resolve_profile(AQUAPURA_SPLIT_GREEN_SN8) is ModelProfile.AQUAPURA_SPLIT_GREEN
+
+
+@pytest.mark.parametrize("selector,param", list(AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS))
+def test_build_aquapura_split_green_query_matches_captured_commands(selector, param):
+    """Every captured app command is reproduced byte-for-byte (checksum included)."""
+    expected = AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(selector, param)]
+    assert build_aquapura_split_green_query(selector, param) == expected
+
+
+def test_build_query_command_aquapura_split_green_uses_app_selector_frames():
+    """Split Green status/sensors fetches send the app's selector frames.
+
+    Subtype 0x01 (status) → selector 01,f4; subtype 0x02 (sensors) → the tank
+    frame 03,84, because on this model the water temperature lives under
+    selector 0x03 rather than the standard sensors subtype.
+    """
+    status_cmd = build_query_command(ModelProfile.AQUAPURA_SPLIT_GREEN, 0x01)
+    sensors_cmd = build_query_command(ModelProfile.AQUAPURA_SPLIT_GREEN, 0x02)
+
+    assert status_cmd == AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0xF4)]
+    assert sensors_cmd == AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)]
+    # Explicitly NOT the standard frames (which this model echoes back verbatim)
+    # nor the KJRH-120L short form.
+    assert status_cmd != build_c3_query(0x01)
+    assert sensors_cmd != build_c3_query(0x02)
+    assert status_cmd != "ffff010101ff"
+
+
+def test_aquapura_split_green_status_decodes_confirmed_setpoint():
+    """body[27] is the DHW setpoint, direct °C (0x32 = 50, as the app showed)."""
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+
+    assert AQUAPURA_SPLIT_GREEN_STATUS_BODY[27] == 0x32
+    # Surfaced via t5s_def so the climate target_temperature reads it.
+    assert status.t5s_def == 50.0
+    assert status.set_temperature == 50
+    assert status.error_code == 0
+    assert status.raw_body == bytes(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+
+
+def test_aquapura_split_green_status_setpoint_tracks_body27():
+    """The setpoint follows body[27] rather than being pinned to one capture."""
+    body = bytearray(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    body[27] = 0x37
+    status = decode_aquapura_split_green_status(bytes(body))
+    assert status.t5s_def == 55.0
+    assert status.set_temperature == 55
+
+
+def test_aquapura_split_green_status_power_and_mode_not_guessed():
+    """Power/mode stays unreported until a RUNNING capture pins the flag byte.
+
+    The captured frame is from an OFF unit, so the candidate flag bytes
+    (body[14]=0x40, body[15]=0x02, body[16]=0x08, body[20]=0x01) cannot be told
+    apart. Reporting a guessed mode would be worse than reporting none, so the
+    decode leaves mode at 0/"Off" and comp_running False.
+    """
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    assert status.mode == 0
+    assert status.mode_name == "Off"
+    assert status.comp_running is False
+
+
+def test_aquapura_split_green_status_suppresses_standard_garbage():
+    """None of the STANDARD decode's misreads survive the Split Green decode."""
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    assert status.box_bottom_temp is None
+    assert status.tr_temperature is None
+    assert status.ptc_temperature is None
+    assert status.total_kwh in (None, 0)
+    assert status.comp_frq in (None, 0)
+    assert status.comp_total_run_hours in (None, 0)
+
+
+def test_aquapura_split_green_status_short_frame_is_safe():
+    """A frame too short to carry body[27] decodes safe, no crash."""
+    status = decode_aquapura_split_green_status(bytes([0x00, 0x01, 0xF4]))
+    assert status.t5s_def is None
+    assert status.set_temperature == 0
+    assert status.error_code == 0
+
+
+def test_aquapura_split_green_profile_applied_to_status_object():
+    """apply_profile_to_status re-decodes the frame via the Split Green layout."""
+    std = decode_its_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    # Confirm the STANDARD decode misreads this frame (the garbage being fixed).
+    assert std.mode == 244
+    assert std.mode_name == "Unknown(244)"
+    assert std.set_temperature == 131
+    assert std.t5s_def == 220.0
+    assert std.error_code == 255
+
+    split_green = apply_profile_to_status(ModelProfile.AQUAPURA_SPLIT_GREEN, std)
+    assert split_green.mode == 0
+    assert split_green.mode_name == "Off"
+    assert split_green.t5s_def == 50.0
+    assert split_green.set_temperature == 50
+    assert split_green.error_code == 0
+
+
+def test_aquapura_split_green_tank_temp_is_16bit_tenths():
+    """body[30:32] = 0x01ec → 49.2 °C (app showed 49)."""
+    assert decode_aquapura_split_green_tank_temp(AQUAPURA_SPLIT_GREEN_TANK_BODY) == 49.2
+    # Tracks the bytes, not the one capture: 0x0226 → 55.0 °C.
+    warmer = _aquapura_split_green_tank_frame(0x0226)[10:-1]
+    assert decode_aquapura_split_green_tank_temp(warmer) == 55.0
+
+
+def test_aquapura_split_green_tank_temp_absent_or_implausible_is_none():
+    """0x7fff (sensor absent), padding and short frames all decode to None."""
+    absent = _aquapura_split_green_tank_frame(0x7FFF)[10:-1]
+    assert decode_aquapura_split_green_tank_temp(absent) is None
+    # An all-0xff stub frame would decode to 6553.5 °C — report nothing instead.
+    assert decode_aquapura_split_green_tank_temp(b"\xff" * 40) is None
+    assert decode_aquapura_split_green_tank_temp(b"\x00\x01\xf4") is None
+
+
+def test_aquapura_split_green_sensors_route_tank_temp_to_th_temp():
+    """The tank temp reaches th_temp; the tank frame's fake temps are nulled.
+
+    The Split Green's "sensors" fetch returns the TANK frame, whose layout has nothing
+    to do with the standard subtype-0x02 sensors frame — every temperature
+    decode_its_sensors derives from it is meaningless and must not reach HA.
+    """
+    sensors = decode_its_sensors(bytearray(AQUAPURA_SPLIT_GREEN_TANK_BODY))
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    out = apply_profile_to_sensors(ModelProfile.AQUAPURA_SPLIT_GREEN, sensors, status)
+
+    assert out.th_temp == 49.2
+    assert out.t3_temp is None
+    assert out.t4_temp is None
+    assert out.t2_temp is None
+    assert out.t2b_temp is None
+    assert out.twin_temp is None
+    assert out.twout_temp is None
+    assert out.t1_temp is None
+    assert out.tf_temp is None
+    assert out.tp_temp is None
+    # raw_body preserved.
+    assert out.raw_body == sensors.raw_body
+
+
+def test_query_status_aquapura_split_green_sends_selector_frame_and_decodes():
+    """query_status with the Split Green sn8 sends the 01,f4 frame and decodes it."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_RAW.hex()) as send:
+        status = client.query_status("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with("APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0xF4)])
+    assert status.t5s_def == 50.0
+    assert status.set_temperature == 50
+    assert status.error_code == 0
+
+
+def test_query_sensors_aquapura_split_green_sends_tank_frame():
+    """query_sensors with the Split Green sn8 sends the 03,84 tank-temperature frame."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_TANK_RAW.hex()) as send:
+        sensors = client.query_sensors("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with("APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)])
+    # The profile override (applied by the coordinator) turns this into th_temp.
+    assert decode_aquapura_split_green_tank_temp(sensors.raw_body) == 49.2
+
+
+def test_aquapura_split_green_set_device_refuses_instead_of_sending_garbage():
+    """Writes are refused for the Split Green: no SET frame has been captured yet.
+
+    The legacy SET path builds its frame from a status query this model does not
+    answer, so it would send a frame assembled from garbage. Fail loudly instead.
+    """
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_RAW.hex()) as send:
+        with pytest.raises(ApiError, match="not supported yet"):
+            client.set_device("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, temperature=50)
+
+    send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

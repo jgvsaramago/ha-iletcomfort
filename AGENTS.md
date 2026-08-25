@@ -87,7 +87,8 @@ model-code serial prefix (e.g. `171H120F` vs `171000AU`). The full per-device se
 and never stored.
 
 **Model-specific decoding is gated on an `sn8 → profile` table** (`custom_components/iletcomfort/model_profiles.py`):
-- `resolve_profile(sn8)` → `ModelProfile.{STANDARD,ATW,AQUAPURA}`. **Unknown/missing sn8 → STANDARD
+- `resolve_profile(sn8)` → `ModelProfile.{STANDARD,ATW,AQUAPURA,KJRH120L,AQUAPURA_SPLIT_GREEN}`.
+  **Unknown/missing sn8 → STANDARD
   (unchanged today's behavior).** So a new model can never be *corrupted* — worst case it doesn't get a
   profile yet. Caveat: `sn8` is assumed model-level (shared across units of a model); only ever confirmed
   on one unit per model so far.
@@ -107,6 +108,37 @@ Status `raw_body` (0-indexed; STANDARD misreads this 25-byte frame):
 - `decode_atw_status(body)` implements this. Uncertain HVAC mode/action is left conservative — validate
   on hardware before adding.
 
+### AQUAPURA_SPLIT_GREEN profile (`sn8 17186T3A`, Energie Aquapura Split Green HPWH, KJR-86T3)
+This model **answers neither standard query**: the long C3 query *and* the KJRH-120L short form are
+**echoed back verbatim** (code 0, `data == command`). Its app sends fully-formed **21-byte selector
+frames** and reads each data group from a **separate** frame:
+
+    aa 14 c3 00 00 00 00 00 00 03 00 <sel> <param> ff ff ff ff 00 ff ff <cks>
+
+`build_aquapura_split_green_query(sel, param)` reproduces all eight captured commands byte-exact.
+`build_query_command` maps `0x01` → selector `01,f4` (STATUS) and `0x02` → `03,84` (**TANK TEMP — note it is
+under selector 0x03, not the standard sensors 0x02**). Other selectors captured but unused:
+`00,00` identity, `00,64` config/limits, `01,90` timers/errors, `02,58`/`02,62` schedule,
+`03,e8` ODU sensors.
+
+Confirmed decode (app showed tank 49 °C, setpoint 50 °C, unit OFF):
+- STATUS body[27] = DHW setpoint, **direct °C** → `t5s_def` / `set_temperature`.
+- TANK body[30:32] = tank temp, **16-bit BE tenths** (`0x01ec` → 49.2) → routed to `th_temp`.
+- Frame boilerplate: body[3..11] (raw idx13..21) is identical in every frame. Raw idx21 = `0x15` is a
+  **constant, NOT ambient 21 °C** — an early coincidence, ruled out by frame comparison.
+- Live temps use `0x7fff` for "sensor absent"; `_aquapura_split_green_temp16` also rejects implausible
+  values so a padded/stub frame reports nothing rather than 6553.5 °C.
+
+**Deliberately not decoded (read-only v1)** — all four need a second capture:
+1. **Power/mode**: the only STATUS capture is from an OFF unit, so the candidate flag bytes
+   (body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) can't be told apart. `mode`
+   stays 0/"Off" until a **RUNNING** capture shows which byte flips.
+2. Whether the `03,84` tank frame is live or cached (re-capture after the temp moves).
+3. Which ODU-frame (`03,e8`) sensor is the app's "ambient" (candidates 35.3/26.8/22.3/21.2/37.8 °C;
+   21.2 matches but is unconfirmed).
+4. **Writes**: no SET command captured. `set_device` **raises a clear ApiError** for this profile
+   rather than building the legacy 62-byte frame from a status query the device doesn't answer.
+
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).
 - The standard `sensors.twin_temp`/`twout_temp` (sensors bytes 25–26) are `0x23` null-fill → decode to 0
@@ -114,11 +146,11 @@ Status `raw_body` (0-indexed; STANDARD misreads this 25-byte frame):
 
 ### Entity routing (important)
 - `sensor.py`: **"Water Inlet Temperature"** ← `twin_temp`; **"DHW Tank Temperature"** ← `th_temp`.
-- `climate.py` `current_temperature` is **profile-aware**: `th_temp` for ATW/AQUAPURA, `twin_temp` for
-  STANDARD.
-- For ATW/AQUAPURA the tank temp is routed into **`th_temp`** (so the correctly-named "DHW Tank
-  Temperature" entity shows it). Do **not** route a tank reading into `twin_temp` (that mislabels "Water
-  Inlet"). This was corrected after a reporter flagged it.
+- `climate.py` `current_temperature` is **profile-aware**: `th_temp` for
+  ATW/AQUAPURA/AQUAPURA_SPLIT_GREEN, `twin_temp` for STANDARD.
+- For ATW/AQUAPURA/AQUAPURA_SPLIT_GREEN the tank temp is routed into **`th_temp`** (so the
+  correctly-named "DHW Tank Temperature" entity shows it). Do **not** route a tank reading into
+  `twin_temp` (that mislabels "Water Inlet"). This was corrected after a reporter flagged it.
 
 ---
 

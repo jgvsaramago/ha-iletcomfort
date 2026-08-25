@@ -775,20 +775,31 @@ class ILetComfortClient:
         ``sn8`` selects the write encoding per model. The KJRH-120L (sn8
         17100003) rejects the standard 62-byte C3 SET frame, so for that profile
         a captured short write command (``00 <field> 01 <value> ff``) is sent
-        directly. Every other (unknown/None/ATW/AQUAPURA) sn8 keeps the legacy
-        build_c3_set path unchanged: query current status for echo bytes, merge
-        the requested changes, validate temperature ranges, build and send the
-        SET frame.
+        directly. The Aquapura Split Green (sn8 17186T3A) is read-only for now: no SET
+        command has been captured for it, and the legacy path below would build
+        its frame from a status query that model does not answer, so writes are
+        refused rather than sent as garbage. Every other
+        (unknown/None/ATW/AQUAPURA) sn8 keeps the legacy build_c3_set path
+        unchanged: query current status for echo bytes, merge the requested
+        changes, validate temperature ranges, build and send the SET frame.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
         from .model_profiles import ModelProfile, resolve_profile
 
-        if resolve_profile(sn8) is ModelProfile.KJRH120L:
+        profile = resolve_profile(sn8)
+        if profile is ModelProfile.KJRH120L:
             return self._set_device_kjrh120l(
                 appliance_code,
                 mode=mode,
                 temperature=temperature,
                 power_on=power_on,
+            )
+        if profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+            raise ApiError(
+                "Control commands are not supported yet for the Aquapura Split Green "
+                "(sn8 17186T3A): this model needs its own write frames, which "
+                "have not been captured from the official app. Reads "
+                "(temperature, setpoint) work."
             )
 
         # Query current status for echo bytes

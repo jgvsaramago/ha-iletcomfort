@@ -106,10 +106,15 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
     def current_temperature(self) -> float | None:
         if self._sensors is None:
             return None
-        # Profile-aware: ATW/AQUAPURA have no real water-inlet reading, so the
-        # meaningful "current" value is the DHW tank temp the profiles surface on
-        # th_temp. STANDARD is unchanged: it reads the real inlet (twin_temp).
-        if self._profile in (ModelProfile.ATW, ModelProfile.AQUAPURA):
+        # Profile-aware: ATW/AQUAPURA/AQUAPURA_SPLIT_GREEN have no real water-inlet
+        # reading, so the meaningful "current" value is the DHW tank temp the
+        # profiles surface on th_temp. STANDARD is unchanged: it reads the real
+        # inlet (twin_temp).
+        if self._profile in (
+            ModelProfile.ATW,
+            ModelProfile.AQUAPURA,
+            ModelProfile.AQUAPURA_SPLIT_GREEN,
+        ):
             return self._sensors.th_temp
         return self._sensors.twin_temp
 
