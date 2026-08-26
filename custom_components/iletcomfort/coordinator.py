@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import (
     ApiError,
@@ -52,6 +53,15 @@ OFFLINE_REPAIR_ID = "device_offline_{entry_id}"
 # cadence as the offline Repair card) warrants a single WARNING (issue #44).
 SUSTAINED_FAILURE_THRESHOLD = 5
 
+# How often the daily schedule (the only Configuration-category "bonus"
+# fetch gated like this — disinfection/heating element/force
+# disinfection/consumption stay on the normal 60s poll) is refetched. A user
+# edits their timer config occasionally, not every minute, so refetching it
+# every 60s poll wastes cloud API calls for no benefit — this decouples its
+# cadence from DEFAULT_SCAN_INTERVAL without adding a second
+# DataUpdateCoordinator or a user-facing setting.
+CONFIG_FETCH_INTERVAL = timedelta(minutes=5)
+
 
 class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls the iLetComfort cloud API."""
@@ -77,6 +87,9 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             / f"iletcomfort_token_{entry.entry_id}"
         )
         self._last_on_state: tuple[int, int] | None = None
+        # When the daily schedule was last (attempted to be) refetched — see
+        # CONFIG_FETCH_INTERVAL.
+        self._last_config_fetch: datetime | None = None
         # Track per-query cache-fallback state. ``_status_degraded`` /
         # ``_sensors_degraded`` drive the offline Repair card (issue #5). The
         # ``*_fail_streak`` counters drive log-level escalation: a query only
@@ -257,20 +270,32 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # current_temperature and Water Inlet sensor read). STANDARD is a no-op.
         sensors = apply_profile_to_sensors(resolve_profile(sn8), sensors, status)
 
-        # Best-effort: only the Aquapura Split Green has a daily-schedule frame
-        # to fetch (query_daily_schedule returns [] with no network call for
-        # every other profile). A failure here is bonus config data, not core
-        # status/sensors, so it stays at DEBUG and never trips the offline
-        # Repair card or a cache-fallback WARNING.
-        try:
-            schedule = await self.hass.async_add_executor_job(
-                self.client.query_daily_schedule, self.appliance_code, sn8,
-            )
-        except AuthError:
-            raise  # bubble up for re-auth
-        except Exception as err:
+        # Daily schedule (Configuration category) — the only one of these
+        # "bonus" fetches gated to CONFIG_FETCH_INTERVAL rather than every
+        # poll: a user edits their timer config occasionally, not every
+        # minute, so refetching it every 60s wastes cloud API calls. A
+        # failure here stays at DEBUG and never trips the offline Repair
+        # card or a cache-fallback WARNING; only the Aquapura Split Green
+        # actually has this frame (query_daily_schedule returns [] with no
+        # network call for every other profile).
+        now = dt_util.utcnow()
+        schedule_fetch_due = (
+            self._last_config_fetch is None
+            or now - self._last_config_fetch >= CONFIG_FETCH_INTERVAL
+        )
+        if schedule_fetch_due:
+            self._last_config_fetch = now
+            try:
+                schedule = await self.hass.async_add_executor_job(
+                    self.client.query_daily_schedule, self.appliance_code, sn8,
+                )
+            except AuthError:
+                raise  # bubble up for re-auth
+            except Exception as err:
+                schedule = cached.get("schedule") or []
+                _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+        else:
             schedule = cached.get("schedule") or []
-            _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
 
         # Disinfection settings live in the same 02,58 frame as the daily
         # schedule (see query_disinfection).

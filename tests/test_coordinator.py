@@ -9,6 +9,7 @@ from datetime import timedelta
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.iletcomfort.api import ApiError, ITSSensors, ITSStatus
@@ -21,6 +22,7 @@ from custom_components.iletcomfort.const import (
     REGION_US,
 )
 from custom_components.iletcomfort.coordinator import (
+    CONFIG_FETCH_INTERVAL,
     OFFLINE_REPAIR_ID,
     OFFLINE_REPAIR_THRESHOLD,
     SUSTAINED_FAILURE_THRESHOLD,
@@ -449,6 +451,74 @@ async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant)
 
     client.query_daily_schedule.assert_called_once_with("APPL1", "17186T3A")
     assert result["schedule"] is schedule
+
+
+async def test_poll_skips_schedule_refetch_within_config_fetch_interval(
+    hass: HomeAssistant,
+):
+    """A second poll within CONFIG_FETCH_INTERVAL of the last schedule fetch
+    reuses the cached schedule instead of hitting the cloud again -- but
+    every other query (status/sensors/disinfection/heating element/force
+    disinfection/consumption) still runs on the normal 60s cadence.
+    """
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    cached_schedule = [object()]
+    coord.data = {"status": ITSStatus(), "sensors": ITSSensors(), "schedule": cached_schedule}
+    # Simulate a schedule fetch that "just happened" a moment ago.
+    coord._last_config_fetch = dt_util.utcnow()
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    client.query_daily_schedule.assert_not_called()
+    assert result["schedule"] is cached_schedule
+    client.query_disinfection.assert_called_once()
+    client.query_heating_element.assert_called_once()
+    client.query_force_disinfection.assert_called_once()
+    client.query_consumption.assert_called_once()
+
+
+async def test_poll_refetches_schedule_after_config_fetch_interval_elapses(
+    hass: HomeAssistant,
+):
+    """Once CONFIG_FETCH_INTERVAL has passed since the last schedule fetch,
+    the next poll fetches it again.
+    """
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    fresh_schedule = [object()]
+    client.query_daily_schedule.return_value = fresh_schedule
+    coord.data = {"status": ITSStatus(), "sensors": ITSSensors(), "schedule": [object()]}
+    coord._last_config_fetch = dt_util.utcnow() - CONFIG_FETCH_INTERVAL - timedelta(seconds=1)
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    client.query_daily_schedule.assert_called_once()
+    assert result["schedule"] is fresh_schedule
 
 
 async def test_poll_fetches_disinfection_and_forwards_sn8(hass: HomeAssistant):
