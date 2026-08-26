@@ -165,9 +165,17 @@ existing split (`compressor_running`, `error`, …), not `sensor`. Registered un
 device (matches the KJRH-120L-suppressed-temps precedent): value_fns index into `data["schedule"]` and
 return `None`/`False` when the slot/list is absent, so non-Split-Green devices just show them
 unknown/off rather than needing profile-conditional entity registration. All 20 carry
-`entity_category=CONFIG` — they represent the device's own timer configuration, so HA groups them
-into the device page's "Configuration" section, distinct from Sensors (live values) and Diagnostic
-(internal telemetry, §4 entity-category table above).
+`entity_category=DIAGNOSTIC` — **not** `CONFIG`, even though they represent the device's own timer
+configuration and "Configuration" reads like the intuitive HA section for them. `CONFIG` is invalid for a
+read-only entity: `SensorEntity`/`BinarySensorEntity.async_internal_added_to_hass` explicitly raise
+`HomeAssistantError("Entity ... cannot be added as the entity category is set to config")` if
+`entity_category is EntityCategory.CONFIG`, since that category is reserved for entities the user can
+*change* (switch/number/select) — a real bug shipped once (all 20 Daily Schedule entities failing to add,
+every poll, on every reload), invisible for a while only because these entities used to be filtered out
+entirely by a "fetch schedule" options-flow toggle that has since been removed (see the note on the options
+flow below). `DIAGNOSTIC` is the only non-primary category available to a plain sensor/binary_sensor, so
+that's what groups them away from the main entity list now — not literally labeled "Configuration", but the
+closest valid equivalent.
 
 **`hvac_modes` restricted to Off/Heat.** The climate entity's default `_attr_hvac_modes` (`Off, Heat,
 Cool, Fan-only`, shared by STANDARD/ATW/AQUAPURA/KJRH-120L) is overridden by an `hvac_modes` property

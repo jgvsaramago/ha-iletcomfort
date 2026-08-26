@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
@@ -141,23 +142,25 @@ def test_primary_entities_are_not_diagnostic():
     assert desc.entity_category is None, "compressor_running"
 
 
-def test_daily_schedule_entities_are_categorized_config():
+def test_daily_schedule_entities_are_categorized_diagnostic():
     """The daily-schedule entities represent the device's own timer
-    configuration, so HA groups them into the device page's "Configuration"
-    section — distinct from both Sensors (live values) and Diagnostic
-    (internal telemetry).
+    configuration, but must use entity_category=DIAGNOSTIC, not CONFIG:
+    HA's SensorEntity/BinarySensorEntity reject CONFIG at add-time with a
+    HomeAssistantError ("cannot be added as the entity category is set to
+    config") since CONFIG is reserved for entities the user can change
+    (switch/number/select), not read-only sensors.
     """
     for key in (
         "daily_schedule_1_setpoint", "daily_schedule_1_start_time",
         "daily_schedule_1_end_time", "daily_schedule_1_mode",
     ):
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
-        assert desc.entity_category is EntityCategory.CONFIG, key
+        assert desc.entity_category is EntityCategory.DIAGNOSTIC, key
 
     desc = next(
         d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
     )
-    assert desc.entity_category is EntityCategory.CONFIG, "daily_schedule_1_active"
+    assert desc.entity_category is EntityCategory.DIAGNOSTIC, "daily_schedule_1_active"
 
 
 def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):
@@ -290,3 +293,61 @@ async def test_silent_mode_select_absent_for_kjrh120l(hass: HomeAssistant):
     added = []
     await select_platform.async_setup_entry(hass, coord.entry, added.extend)
     assert added == []
+
+
+async def test_full_integration_setup_adds_every_entity_without_error(
+    hass: HomeAssistant, caplog,
+):
+    """Regression test for the entity_category=CONFIG bug: HA's
+    SensorEntity/BinarySensorEntity raise HomeAssistantError ("cannot be
+    added as the entity category is set to config") if entity_category is
+    CONFIG, since that's reserved for entities the user can change. Every
+    other test in this file collects entity objects into a plain list and
+    never runs them through HA's real add-to-platform validation, so this
+    class of bug was invisible to the test suite. This one goes through
+    ``hass.config_entries.async_setup`` so ``add_to_platform_finish()`` (and
+    the entity_category check inside it) genuinely runs for every entity,
+    for a profile (Aquapura Split Green) that populates every optional field
+    (schedule, disinfection) so every description actually gets exercised.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_APPLIANCE_CODE: "APPL1",
+            CONF_REGION: REGION_US,
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        client = mock_cls.return_value
+        client.load_token.return_value = True
+        client.list_appliances.return_value = [
+            {"applianceCode": "APPL1", "sn8": "17186T3A"},
+        ]
+        client.query_status.return_value = ITSStatus(mode=1)
+        client.query_sensors.return_value = ITSSensors()
+        client.query_daily_schedule.return_value = [
+            AquapuraSplitGreenScheduleSlot(
+                active=True, mode="Eco", setpoint=50.0,
+                start_time="09:00", end_time="21:00",
+            ),
+        ]
+        client.query_disinfection.return_value = None
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert "cannot be added as the entity category" not in caplog.text
+    assert "Error adding entity" not in caplog.text
+
+    entity_ids = hass.states.async_entity_ids()
+    assert any("daily_schedule_1_setpoint" in e for e in entity_ids)
+    assert any("daily_schedule_1_active" in e for e in entity_ids)
