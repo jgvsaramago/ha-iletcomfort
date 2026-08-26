@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -25,11 +25,7 @@ from .api import (
 )
 from .const import (
     CONF_APPLIANCE_CODE,
-    CONF_FETCH_DIAGNOSTICS,
-    CONF_FETCH_SCHEDULE,
     CONF_REGION,
-    DEFAULT_FETCH_DIAGNOSTICS,
-    DEFAULT_FETCH_SCHEDULE,
     DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -61,26 +57,17 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls the iLetComfort cloud API."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=scan_interval),
+            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
         self.entry = entry
         region = entry.data.get(CONF_REGION, DEFAULT_REGION)
         api_base = REGION_URLS.get(region, REGION_URLS[DEFAULT_REGION])
         self.client = ILetComfortClient(api_base=api_base)
         self.appliance_code: str = entry.data.get(CONF_APPLIANCE_CODE, "")
-        # Per-poll fetch toggles (options flow). Both only affect the
-        # Aquapura Split Green profile — see _poll() and query_sensors().
-        self._fetch_diagnostics: bool = entry.options.get(
-            CONF_FETCH_DIAGNOSTICS, DEFAULT_FETCH_DIAGNOSTICS,
-        )
-        self._fetch_schedule: bool = entry.options.get(
-            CONF_FETCH_SCHEDULE, DEFAULT_FETCH_SCHEDULE,
-        )
         # Cloud metadata for this appliance (applianceType, modelNumber, sn8, …),
         # fetched once and surfaced in diagnostics only. See
         # ``_ensure_appliance_meta``.
@@ -106,20 +93,6 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def last_on_state(self) -> tuple[int, int] | None:
         """Return the last known on-state (set_mode, temperature)."""
         return self._last_on_state
-
-    @property
-    def fetch_schedule(self) -> bool:
-        """Return whether the "Fetch daily schedule" option is enabled.
-
-        Read by sensor.py/binary_sensor.py at platform setup to decide whether
-        to register the 20 Daily Schedule entities at all: unlike the
-        diagnostics toggle (which only blanks one value shared by every
-        profile — Outdoor Ambient Temperature — so its entity always stays
-        registered), this one gates a coherent, dedicated block of entities
-        1:1 with a single skippable API call, so disabling it removes them
-        from the device entirely rather than leaving them showing unavailable.
-        """
-        return self._fetch_schedule
 
     @property
     def sn8(self) -> str | None:
@@ -219,7 +192,6 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.client.query_sensors,
                 self.appliance_code,
                 sn8,
-                self._fetch_diagnostics,
             )
             self._sensors_degraded = False
             self._sensors_fail_streak = self._note_query_recovery(
@@ -289,38 +261,28 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # to fetch (query_daily_schedule returns [] with no network call for
         # every other profile). A failure here is bonus config data, not core
         # status/sensors, so it stays at DEBUG and never trips the offline
-        # Repair card or a cache-fallback WARNING. The user can disable this
-        # fetch entirely (options flow) to save one cloud command per poll —
-        # sensor.py/binary_sensor.py then don't register the Daily Schedule
-        # entities at all (see coordinator.fetch_schedule), so this list is
-        # never read; kept empty rather than stale cached data regardless.
-        if self._fetch_schedule:
-            try:
-                schedule = await self.hass.async_add_executor_job(
-                    self.client.query_daily_schedule, self.appliance_code, sn8,
-                )
-            except AuthError:
-                raise  # bubble up for re-auth
-            except Exception as err:
-                schedule = cached.get("schedule") or []
-                _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+        # Repair card or a cache-fallback WARNING.
+        try:
+            schedule = await self.hass.async_add_executor_job(
+                self.client.query_daily_schedule, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            schedule = cached.get("schedule") or []
+            _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
 
-            # Disinfection settings live in the same 02,58 frame as the daily
-            # schedule (see query_disinfection), so this fetch is gated on the
-            # same "Fetch daily schedule" option rather than adding a second
-            # toggle for what the app shows on the same config screen.
-            try:
-                disinfection = await self.hass.async_add_executor_job(
-                    self.client.query_disinfection, self.appliance_code, sn8,
-                )
-            except AuthError:
-                raise  # bubble up for re-auth
-            except Exception as err:
-                disinfection = cached.get("disinfection")
-                _LOGGER.debug("Disinfection query failed, using cache: %s", err)
-        else:
-            schedule = []
-            disinfection = None
+        # Disinfection settings live in the same 02,58 frame as the daily
+        # schedule (see query_disinfection).
+        try:
+            disinfection = await self.hass.async_add_executor_job(
+                self.client.query_disinfection, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            disinfection = cached.get("disinfection")
+            _LOGGER.debug("Disinfection query failed, using cache: %s", err)
 
         self._update_offline_repair()
 

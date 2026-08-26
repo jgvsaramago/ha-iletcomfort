@@ -237,10 +237,9 @@ carries every field, a caller changing only `enabled` (the **Disinfection** swit
 current hour/minute/temperature/cycle_days — it does NOT default them, since sending zeros would actually
 reset the device's real schedule. `api.py`'s `query_disinfection`/`set_disinfection` and
 `coordinator.async_set_disinfection` implement this; the switch reads current values from
-`coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. Gated on
-the same `CONF_FETCH_SCHEDULE` option as the daily schedule (same source frame, same "extra poll" cost
-tradeoff), so it costs one extra command per poll — the tank/ODU sensors already established two commands
-per poll as an accepted cost for this profile.
+`coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. Fetched
+unconditionally every poll (same as the daily schedule, whose 02,58 frame it shares) — costs one extra
+command per poll, on top of the tank/ODU sensors' own two commands, an accepted cost for this profile.
 
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real
@@ -272,49 +271,24 @@ per poll as an accepted cost for this profile.
 |------|----------------|
 | `api.py` | `ILetComfortClient` (login, `list_appliances`, `send_hex_command`, `query_status`/`query_sensors`); frame build/parse (`build_c3_query`, `build_c3_set`, `parse_hex_response`, `extract_c3_body`); decoders `decode_its_status`/`decode_its_sensors` + dataclasses `ITSStatus`/`ITSSensors`; `_temp_offset`; `AuthError`/`ApiError`. |
 | `model_profiles.py` | `ModelProfile` enum, `_SN8_PROFILES` table, `resolve_profile`, `decode_atw_status`, `apply_profile_to_status`, `apply_profile_to_sensors`. **Add new model support here.** |
-| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. Reads `entry.options` for poll interval + fetch toggles (§7). |
+| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. Fixed `DEFAULT_SCAN_INTERVAL` poll cadence; every per-poll fetch (sensors diagnostics, daily schedule, disinfection) always runs — no user-facing config to disable them. |
 | `diagnostics.py` | Redacted snapshot: raw frames, decoded status/sensors, `sensors_temperature_scan` (per-byte `_temp_offset` map — use it to find a model's misplaced temp byte), and the `appliance` metadata block. `APPLIANCE_TO_REDACT = {owner, sn, name}` (keeps `applianceType`/`modelNumber`/`sn8`). |
 | `climate.py` / `sensor.py` / `binary_sensor.py` / `switch.py` / `select.py` | HA entities. See §4 for which field backs which entity. |
-| `config_flow.py` / `__init__.py` / `const.py` / `entity.py` | Setup, entry, constants, base entity, options flow (§7). |
+| `config_flow.py` / `__init__.py` / `const.py` / `entity.py` | Setup, entry, constants, base entity. No options flow — the integration has zero user-configurable settings by design (see the note below). |
 | `tests/` | pytest suite; real captured frames are pinned as fixtures (e.g. issue-#11 frames for STANDARD regression). |
 
----
-
-## 6a. Options flow (poll interval, per-poll fetch toggles)
-
-`config_flow.py`'s `ILetComfortOptionsFlow` (accessed via the integration's **Configure** button) exposes
-three settings, all under `entry.options` (never `entry.data` — options don't require re-auth):
-- `scan_interval` (`homeassistant.const.CONF_SCAN_INTERVAL`, default `DEFAULT_SCAN_INTERVAL`=60s, floor
-  `MIN_SCAN_INTERVAL`=30s) — the coordinator's `update_interval`.
-- `fetch_diagnostics` (default `True`) — forwarded to `client.query_sensors(..., fetch_diagnostics=...)`.
-- `fetch_schedule` (default `True`) — gates whether `_poll()` calls `client.query_daily_schedule` at all.
-
-**Both fetch toggles only affect the Aquapura Split Green** (sn8 `17186T3A`): every other profile's
-status/sensors poll is already the minimum two commands regardless of these flags — flipping them off
-for a STANDARD/ATW/AQUAPURA/KJRH-120L device is a harmless no-op. For the Split Green specifically:
-- `fetch_diagnostics=False` skips the second (ODU/ambient) command inside
-  `_query_aquapura_split_green_sensors` — saves one cloud call per poll, costs the Outdoor Ambient
-  Temperature sensor (`t4_temp`). Despite the name, it does **not** affect the `entity_category=DIAGNOSTIC`
-  sensors on other profiles (condenser/evaporator/odu_voltage/…) — those are decoded from the
-  status/sensors calls already made every poll, so there's no extra call to skip for them. The entity
-  itself (Outdoor Ambient Temperature) always stays registered — it's a normal, always-relevant sensor
-  shared by every profile, just blanked (`None`) while this is off — so it is **not** removed like the
-  schedule entities below.
-- `fetch_schedule=False` skips `client.query_daily_schedule` entirely (no network call) — saves one cloud
-  call per poll. Unlike `fetch_diagnostics`, this **removes the 20 `Daily Schedule *` entities from the
-  device entirely** (`sensor.py`/`binary_sensor.py`'s `async_setup_entry` filter them out via
-  `coordinator.fetch_schedule` when building the entity list, rather than registering them to sit
-  unavailable/unknown) — they're a coherent block 1:1 with one skippable call, unlike the diagnostics
-  toggle's single shared value, so full removal is the right shape here. Re-enabling adds them back on
-  the next reload (saving the options form always triggers one).
-
-The options form's suggested (pre-filled) values are the entry's *current* saved options, via
-`self.add_suggested_values_to_schema(schema, {...})` — **not** a `vol.Optional(key, default=...)` static
-default, which would ignore what's already saved. `OptionsFlow.__init__` deliberately does **not** store
-`self.config_entry = config_entry` (deprecated, removed in HA 2025.12+); `self.config_entry` is read from
-the base class's property instead, inside `async_step_init` (see class docstring). Saving options triggers
-a full entry reload (`entry.add_update_listener` in `__init__.py`) so the coordinator picks up the new
-values — there's no live "hot" option update.
+**No options flow, deliberately.** An earlier version added a Configure options flow (poll interval,
+per-poll fetch toggles for diagnostics/daily-schedule). It was removed: the fetch toggles left orphaned
+"unavailable" Daily Schedule entities behind in the entity registry when disabled (HA doesn't retroactively
+delete previously-registered entities just because a later reload stops creating them — the platform
+simply stops touching them, and they sit greyed out until manually deleted from Settings → Devices &
+Services → Entities). Every per-poll fetch (diagnostics, daily schedule, disinfection) now always runs
+unconditionally, and every entity is always registered — the same "declared unconditionally, reads inert
+for non-applicable profiles" shape used everywhere else in this codebase (Boost/Silence switches, climate
+presets). If a orphaned "unavailable" entity from the old toggle still lingers for a user upgrading from
+that version, it must be deleted manually via the UI — the integration re-registering it on this version's
+first reload does not resurrect an entity id HA has already marked orphaned, so point users at manual
+deletion first when this is reported.
 
 ---
 

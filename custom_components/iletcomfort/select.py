@@ -11,9 +11,17 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
+from .model_profiles import ModelProfile, resolve_profile
 
 MUTE_OPTIONS = ["Off", "Level 1", "Level 2"]
 _MUTE_TO_API = {"Off": 0, "Level 1": 1, "Level 2": 2}
+
+# Profiles whose set_device() sends a dedicated captured command (KJRH-120L's
+# short write, the Aquapura Split Green's single-field selector writes)
+# instead of the legacy C3 SET frame that carries ctrl_flag/mute_level. Their
+# _set_device_* methods don't accept a mute kwarg at all, so a mute write is
+# silently dropped — the Silent Mode select would do nothing on these models.
+_MUTE_UNSUPPORTED_PROFILES = (ModelProfile.KJRH120L, ModelProfile.AQUAPURA_SPLIT_GREEN)
 
 
 async def async_setup_entry(
@@ -23,6 +31,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up select entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    if resolve_profile(coordinator.sn8) in _MUTE_UNSUPPORTED_PROFILES:
+        # Don't register an entity that would sit there doing nothing when
+        # changed, rather than showing a control the device can't act on.
+        return
     async_add_entities([ILetComfortMuteSelect(coordinator)])
 
 

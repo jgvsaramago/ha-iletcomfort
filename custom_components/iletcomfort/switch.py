@@ -23,17 +23,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up switch entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[SwitchEntity] = [
+    async_add_entities([
         ILetComfortBoostSwitch(coordinator),
         ILetComfortSilenceSwitch(coordinator),
-    ]
-    if coordinator.fetch_schedule:
-        # Disinfection settings share the daily-schedule frame (02,58), so
-        # this entity is gated on the same "Fetch daily schedule" option —
-        # off means query_disinfection is never called, and the switch would
-        # sit unavailable forever (see coordinator.fetch_schedule).
-        entities.append(ILetComfortDisinfectionSwitch(coordinator))
-    async_add_entities(entities)
+        ILetComfortDisinfectionSwitch(coordinator),
+    ])
 
 
 class ILetComfortBoostSwitch(CoordinatorEntity[ILetComfortCoordinator], SwitchEntity):
@@ -101,11 +95,12 @@ class ILetComfortDisinfectionSwitch(
 ):
     """Switch entity for the Aquapura Split Green's "Desinfecção" (disinfection) mode.
 
-    Only added when ``coordinator.fetch_schedule`` is on (see
-    ``async_setup_entry``) since it shares that fetch's 02,58 frame. Toggling
-    it resends the current hour/minute/temperature/cycle-days along with the
-    new enable bit — the device's write command always carries all five
-    fields together (see ``build_aquapura_split_green_disinfection_command``).
+    Declared unconditionally like the other switches; every other profile
+    never populates ``coordinator.data["disinfection"]``, so this reads "off"
+    and its writes raise (see ``_async_set``) for them. Toggling it resends
+    the current hour/minute/temperature/cycle-days along with the new enable
+    bit — the device's write command always carries all five fields together
+    (see ``build_aquapura_split_green_disinfection_command``).
     """
 
     _attr_has_entity_name = True

@@ -6,23 +6,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-import voluptuous as vol
 from homeassistant import config_entries, data_entry_flow
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.iletcomfort.api import ApiError, AuthError
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
-    CONF_FETCH_DIAGNOSTICS,
-    CONF_FETCH_SCHEDULE,
     CONF_REGION,
-    DEFAULT_FETCH_DIAGNOSTICS,
-    DEFAULT_FETCH_SCHEDULE,
-    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    MIN_SCAN_INTERVAL,
     REGION_EU,
     REGION_US,
 )
@@ -404,102 +397,3 @@ async def test_same_device_added_twice_aborts(hass: HomeAssistant):
     assert result["type"] == data_entry_flow.FlowResultType.ABORT
     assert result["reason"] == "already_configured"
 
-
-# --- Options flow: poll interval + per-poll fetch toggles -----------------
-
-
-def _v2_entry(hass: HomeAssistant, options: dict | None = None) -> MockConfigEntry:
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id=f"{EMAIL}:APPL1",
-        data={
-            CONF_EMAIL: EMAIL,
-            CONF_PASSWORD: PASSWORD,
-            CONF_REGION: REGION_US,
-            CONF_APPLIANCE_CODE: "APPL1",
-        },
-        options=options or {},
-        version=2,
-    )
-    entry.add_to_hass(hass)
-    return entry
-
-
-async def test_options_flow_shows_current_values_as_defaults(hass: HomeAssistant):
-    """The form's suggested values are the entry's current options (or the
-    module defaults for an entry that's never been configured)."""
-    entry = _v2_entry(hass)
-
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "init"
-    schema = result["data_schema"].schema
-    suggested = {
-        key.schema: key.description.get("suggested_value")
-        for key in schema
-        if hasattr(key, "description") and key.description
-    }
-    assert suggested[CONF_SCAN_INTERVAL] == DEFAULT_SCAN_INTERVAL
-    assert suggested[CONF_FETCH_DIAGNOSTICS] == DEFAULT_FETCH_DIAGNOSTICS
-    assert suggested[CONF_FETCH_SCHEDULE] == DEFAULT_FETCH_SCHEDULE
-
-
-async def test_options_flow_shows_previously_saved_values(hass: HomeAssistant):
-    """A previously-saved option is suggested back, not the module default."""
-    entry = _v2_entry(
-        hass,
-        options={
-            CONF_SCAN_INTERVAL: 120,
-            CONF_FETCH_DIAGNOSTICS: False,
-            CONF_FETCH_SCHEDULE: False,
-        },
-    )
-
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-
-    schema = result["data_schema"].schema
-    suggested = {
-        key.schema: key.description.get("suggested_value")
-        for key in schema
-        if hasattr(key, "description") and key.description
-    }
-    assert suggested[CONF_SCAN_INTERVAL] == 120
-    assert suggested[CONF_FETCH_DIAGNOSTICS] is False
-    assert suggested[CONF_FETCH_SCHEDULE] is False
-
-
-async def test_options_flow_saves_submitted_values(hass: HomeAssistant):
-    """Submitting the form saves the new values to entry.options."""
-    entry = _v2_entry(hass)
-
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        user_input={
-            CONF_SCAN_INTERVAL: 90,
-            CONF_FETCH_DIAGNOSTICS: False,
-            CONF_FETCH_SCHEDULE: True,
-        },
-    )
-
-    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    assert entry.options[CONF_SCAN_INTERVAL] == 90
-    assert entry.options[CONF_FETCH_DIAGNOSTICS] is False
-    assert entry.options[CONF_FETCH_SCHEDULE] is True
-
-
-async def test_options_flow_scan_interval_floor_is_enforced(hass: HomeAssistant):
-    """A scan interval below MIN_SCAN_INTERVAL is rejected by the selector."""
-    entry = _v2_entry(hass)
-
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    with pytest.raises(vol.Invalid):
-        await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={
-                CONF_SCAN_INTERVAL: MIN_SCAN_INTERVAL - 1,
-                CONF_FETCH_DIAGNOSTICS: True,
-                CONF_FETCH_SCHEDULE: True,
-            },
-        )

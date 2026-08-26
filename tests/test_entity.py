@@ -19,13 +19,13 @@ from custom_components.iletcomfort.binary_sensor import (
 from custom_components.iletcomfort.climate import ILetComfortClimate
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
-    CONF_FETCH_SCHEDULE,
     CONF_REGION,
     DOMAIN,
     REGION_US,
 )
 from custom_components.iletcomfort.coordinator import ILetComfortCoordinator
 from custom_components.iletcomfort.model_profiles import AquapuraSplitGreenScheduleSlot
+from custom_components.iletcomfort import select as select_platform
 from custom_components.iletcomfort.select import ILetComfortMuteSelect
 from custom_components.iletcomfort.sensor import (
     SENSOR_DESCRIPTIONS,
@@ -231,17 +231,12 @@ def test_daily_schedule_active_binary_sensor_false_without_schedule_data(
     assert ILetComfortBinarySensor(coord, desc).is_on is False
 
 
-# --- Daily Schedule entities: removed from the device (not left unavailable)
-# when "Fetch daily schedule" is off, since they're a coherent block 1:1 with
-# one skippable API call — unlike the diagnostics toggle, which only blanks
-# one value (Outdoor Ambient Temperature) shared by every profile and so
-# never removes an entity (see coordinator.fetch_schedule). ------------------
+# --- Daily Schedule entities: always registered, like every other entity in
+# this integration (no options flow to disable their fetch). ----------------
 
 
-async def test_daily_schedule_entities_registered_when_fetch_schedule_enabled(
-    hass: HomeAssistant,
-):
-    coord = _coordinator(hass)  # fetch_schedule defaults to True
+async def test_daily_schedule_entities_are_always_registered(hass: HomeAssistant):
+    coord = _coordinator(hass)
     hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
 
     added = []
@@ -249,29 +244,49 @@ async def test_daily_schedule_entities_registered_when_fetch_schedule_enabled(
     keys = {e.entity_description.key for e in added}
     assert "daily_schedule_1_setpoint" in keys
     assert "daily_schedule_4_mode" in keys
-
-    added_bs = []
-    await binary_sensor_platform.async_setup_entry(hass, coord.entry, added_bs.extend)
-    bs_keys = {e.entity_description.key for e in added_bs}
-    assert "daily_schedule_1_active" in bs_keys
-
-
-async def test_daily_schedule_entities_absent_when_fetch_schedule_disabled(
-    hass: HomeAssistant,
-):
-    coord = _coordinator(hass, options={CONF_FETCH_SCHEDULE: False})
-    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
-
-    added = []
-    await sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
-    keys = {e.entity_description.key for e in added}
-    assert not any(k.startswith("daily_schedule_") for k in keys)
-    # Everything else is still registered.
     assert "dhw_tank" in keys
     assert "odu_current" in keys
 
     added_bs = []
     await binary_sensor_platform.async_setup_entry(hass, coord.entry, added_bs.extend)
     bs_keys = {e.entity_description.key for e in added_bs}
-    assert not any(k.startswith("daily_schedule_") for k in bs_keys)
+    assert "daily_schedule_1_active" in bs_keys
     assert "compressor_running" in bs_keys
+
+
+# --- Silent Mode select: hidden for profiles whose set_device() bypasses the
+# ctrl_flag/mute_level write entirely (mute would silently do nothing). ------
+
+
+async def test_silent_mode_select_registered_for_standard_profile(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)  # no appliance_meta -> sn8 None -> STANDARD
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await select_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert len(added) == 1
+    assert isinstance(added[0], ILetComfortMuteSelect)
+
+
+async def test_silent_mode_select_absent_for_aquapura_split_green(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await select_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert added == []
+
+
+async def test_silent_mode_select_absent_for_kjrh120l(hass: HomeAssistant):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17100003"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await select_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert added == []
