@@ -244,3 +244,22 @@ async def test_async_set_preset_mode_forwards_operating_mode():
     entity.coordinator.async_set_device.assert_awaited_once_with(
         operating_mode="Disparo",
     )
+
+
+def test_aquapura_split_green_hvac_modes_restricted_to_off_heat():
+    """The Split Green is a DHW-only heat pump: no Cool/Fan-only options.
+
+    Only power Off/Heat (STATUS body[13]) is confirmed for this model, so
+    offering Cool/Fan-only would let a user pick a mode the device can't do.
+    """
+    entity = _climate(AQUAPURA_SPLIT_GREEN_SN8, ITSSensors())
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT]
+
+
+@pytest.mark.parametrize("sn8", [None, ATW_SN8, AQUAPURA_SN8, KJRH120L_SN8])
+def test_other_profiles_hvac_modes_unchanged(sn8):
+    """STANDARD/ATW/AQUAPURA/KJRH-120L keep the legacy full mode list."""
+    entity = _climate(sn8, ITSSensors())
+    assert entity.hvac_modes == [
+        HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY,
+    ]

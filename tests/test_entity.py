@@ -117,19 +117,35 @@ def test_internal_diagnostic_entities_are_categorized_diagnostic():
 def test_primary_entities_are_not_diagnostic():
     """Everyday-relevant values stay in the main entity list, not tucked away
     under Diagnostic: live water/outdoor temps, total energy (for the Energy
-    dashboard), compressor running, and the daily-schedule entities the user
-    explicitly asked to see.
+    dashboard), and compressor running.
     """
     for key in (
-        "water_inlet", "water_outlet", "dhw_tank", "outdoor_ambient",
-        "total_energy", "daily_schedule_1_setpoint", "daily_schedule_1_mode",
+        "water_inlet", "water_outlet", "dhw_tank", "outdoor_ambient", "total_energy",
     ):
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
         assert desc.entity_category is None, key
 
-    for key in ("compressor_running", "daily_schedule_1_active"):
-        desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == key)
-        assert desc.entity_category is None, key
+    desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "compressor_running")
+    assert desc.entity_category is None, "compressor_running"
+
+
+def test_daily_schedule_entities_are_categorized_config():
+    """The daily-schedule entities represent the device's own timer
+    configuration, so HA groups them into the device page's "Configuration"
+    section — distinct from both Sensors (live values) and Diagnostic
+    (internal telemetry).
+    """
+    for key in (
+        "daily_schedule_1_setpoint", "daily_schedule_1_start_time",
+        "daily_schedule_1_end_time", "daily_schedule_1_mode",
+    ):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.entity_category is EntityCategory.CONFIG, key
+
+    desc = next(
+        d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
+    )
+    assert desc.entity_category is EntityCategory.CONFIG, "daily_schedule_1_active"
 
 
 def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):

@@ -69,10 +69,13 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
             data.get("status") is not None and data["status"].error_code != 0
         ),
     ),
+    # Grouped into "Configuration" alongside the rest of the daily-schedule
+    # entities (sensor.py) — see the note there.
     *(
         ILetComfortBinarySensorDescription(
             key=f"daily_schedule_{n}_active",
             name=f"Daily Schedule {n} Active",
+            entity_category=EntityCategory.CONFIG,
             is_on_fn=_schedule_slot_active(n - 1),
         )
         for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)

@@ -76,6 +76,9 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
     _attr_has_entity_name = True
     _attr_name = "Heat Pump"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    # Default for STANDARD/ATW/AQUAPURA/KJRH-120L; overridden by the
+    # hvac_modes property below for the Aquapura Split Green, a DHW-only
+    # heat pump with no real Cool/Fan-only capability.
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.FAN_ONLY]
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
@@ -113,6 +116,15 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
     def _profile(self) -> ModelProfile:
         """Resolve the decode profile from the coordinator's sn8 model code."""
         return resolve_profile(self.coordinator.sn8)
+
+    @property
+    def hvac_modes(self) -> list[HVACMode]:
+        # The Aquapura Split Green is a DHW-only heat pump: only power
+        # Off/Heat is confirmed (STATUS body[13]), so Cool/Fan-only must not
+        # be offered as choices the device can't actually do.
+        if self._profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return [HVACMode.OFF, HVACMode.HEAT]
+        return self._attr_hvac_modes
 
     @property
     def current_temperature(self) -> float | None:

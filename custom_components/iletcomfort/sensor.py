@@ -213,6 +213,10 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("odu_current"),
     ),
+    # Daily-schedule entities represent the device's own timer configuration
+    # (not live telemetry, not something watched day-to-day), so they get
+    # entity_category=CONFIG — HA groups them into the device page's
+    # "Configuration" section, distinct from both Sensors and Diagnostic.
     *(
         description
         for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
@@ -223,24 +227,28 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
                 native_unit_of_measurement=UnitOfTemperature.CELSIUS,
                 device_class=SensorDeviceClass.TEMPERATURE,
                 state_class=SensorStateClass.MEASUREMENT,
+                entity_category=EntityCategory.CONFIG,
                 value_fn=_schedule_slot(n - 1, "setpoint"),
             ),
             ILetComfortSensorDescription(
                 key=f"daily_schedule_{n}_start_time",
                 name=f"Daily Schedule {n} Start Time",
                 icon="mdi:clock-start",
+                entity_category=EntityCategory.CONFIG,
                 value_fn=_schedule_slot(n - 1, "start_time"),
             ),
             ILetComfortSensorDescription(
                 key=f"daily_schedule_{n}_end_time",
                 name=f"Daily Schedule {n} End Time",
                 icon="mdi:clock-end",
+                entity_category=EntityCategory.CONFIG,
                 value_fn=_schedule_slot(n - 1, "end_time"),
             ),
             ILetComfortSensorDescription(
                 key=f"daily_schedule_{n}_mode",
                 name=f"Daily Schedule {n} Mode",
                 icon="mdi:tune-variant",
+                entity_category=EntityCategory.CONFIG,
                 value_fn=_schedule_slot(n - 1, "mode"),
             ),
         )

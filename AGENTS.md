@@ -164,7 +164,15 @@ shows a disabled slot's config too. Fetched by a **separate, best-effort** poll
 existing split (`compressor_running`, `error`, …), not `sensor`. Registered unconditionally for every
 device (matches the KJRH-120L-suppressed-temps precedent): value_fns index into `data["schedule"]` and
 return `None`/`False` when the slot/list is absent, so non-Split-Green devices just show them
-unknown/off rather than needing profile-conditional entity registration.
+unknown/off rather than needing profile-conditional entity registration. All 20 carry
+`entity_category=CONFIG` — they represent the device's own timer configuration, so HA groups them
+into the device page's "Configuration" section, distinct from Sensors (live values) and Diagnostic
+(internal telemetry, §4 entity-category table above).
+
+**`hvac_modes` restricted to Off/Heat.** The climate entity's default `_attr_hvac_modes` (`Off, Heat,
+Cool, Fan-only`, shared by STANDARD/ATW/AQUAPURA/KJRH-120L) is overridden by an `hvac_modes` property
+for this profile: only power Off/Heat is confirmed (STATUS body[13]), so the Split Green is a DHW-only
+heat pump and Cool/Fan-only must not be offered as choices the device can't actually do.
 
 **Power — confirmed.** A real ON/OFF mitmproxy capture pair (SET request + STATUS response, both states)
 pins **STATUS body[13]** (raw idx23) as the power bit (`0x00`=Off, `0x01`=On); diffing the two response
