@@ -21,6 +21,7 @@ from homeassistant.const import (
     UnitOfElectricPotential,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -100,12 +101,18 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=_s("t4_temp"),
     ),
+    # Internal refrigerant-circuit temps and the electrical/runtime counters
+    # below are diagnostic, not everyday-useful values (HA groups
+    # entity_category=DIAGNOSTIC entities into a separate, collapsed section on
+    # the device page) — unlike the four temps above, which read live
+    # water/outdoor conditions a user actually watches.
     ILetComfortSensorDescription(
         key="condenser",
         name="Condenser Temperature",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("t3_temp"),
     ),
     ILetComfortSensorDescription(
@@ -114,6 +121,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("t2_temp"),
     ),
     ILetComfortSensorDescription(
@@ -122,6 +130,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("tf_temp"),
     ),
     ILetComfortSensorDescription(
@@ -130,6 +139,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("tp_temp"),
     ),
     ILetComfortSensorDescription(
@@ -138,6 +148,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfFrequency.HERTZ,
         device_class=SensorDeviceClass.FREQUENCY,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_st("comp_frq"),
     ),
     ILetComfortSensorDescription(
@@ -154,6 +165,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.HOURS,
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_st("comp_total_run_hours"),
     ),
     ILetComfortSensorDescription(
@@ -161,6 +173,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         name="High Pressure",
         icon="mdi:gauge-full",
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_st("pressure_h"),
     ),
     ILetComfortSensorDescription(
@@ -168,12 +181,14 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         name="Low Pressure",
         icon="mdi:gauge-low",
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_st("pressure_l"),
     ),
     ILetComfortSensorDescription(
         key="error_code",
         name="Error Code",
         icon="mdi:alert-circle-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_st("error_code"),
     ),
     ILetComfortSensorDescription(
@@ -182,6 +197,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("odu_voltage"),
     ),
     # odu_current is decoded as fixed-point Amperes (raw 16-bit value / 256).
@@ -194,6 +210,7 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("odu_current"),
     ),
     *(

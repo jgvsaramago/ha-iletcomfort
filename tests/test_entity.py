@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.iletcomfort.api import ITSSensors, ITSStatus
@@ -92,6 +93,43 @@ def test_odu_current_sensor_exists_and_reads_scaled_amps(hass: HomeAssistant):
 
     sensor = ILetComfortSensor(coord, desc)
     assert sensor.native_value == 4.0
+
+
+def test_internal_diagnostic_entities_are_categorized_diagnostic():
+    """Internal-circuit/electrical/runtime entities group under the device
+    page's collapsed "Diagnostic" section, matching what other HA integrations
+    do for values that aren't everyday-useful (HA groups
+    entity_category=DIAGNOSTIC entities separately from the main entity list).
+    """
+    for key in (
+        "condenser", "evaporator", "refrigerant", "plate_hx",
+        "compressor_freq", "comp_run_hours", "pressure_high", "pressure_low",
+        "error_code", "odu_voltage", "odu_current",
+    ):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.entity_category is EntityCategory.DIAGNOSTIC, key
+
+    for key in ("ibh_running", "error"):
+        desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.entity_category is EntityCategory.DIAGNOSTIC, key
+
+
+def test_primary_entities_are_not_diagnostic():
+    """Everyday-relevant values stay in the main entity list, not tucked away
+    under Diagnostic: live water/outdoor temps, total energy (for the Energy
+    dashboard), compressor running, and the daily-schedule entities the user
+    explicitly asked to see.
+    """
+    for key in (
+        "water_inlet", "water_outlet", "dhw_tank", "outdoor_ambient",
+        "total_energy", "daily_schedule_1_setpoint", "daily_schedule_1_mode",
+    ):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.entity_category is None, key
+
+    for key in ("compressor_running", "daily_schedule_1_active"):
+        desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == key)
+        assert desc.entity_category is None, key
 
 
 def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):

@@ -12,6 +12,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -54,6 +55,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
         key="ibh_running",
         name="IBH Running",
         device_class=BinarySensorDeviceClass.RUNNING,
+        entity_category=EntityCategory.DIAGNOSTIC,
         is_on_fn=lambda data: (
             data.get("status") is not None and data["status"].ibh_running
         ),
@@ -62,6 +64,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
         key="error",
         name="Error",
         device_class=BinarySensorDeviceClass.PROBLEM,
+        entity_category=EntityCategory.DIAGNOSTIC,
         is_on_fn=lambda data: (
             data.get("status") is not None and data["status"].error_code != 0
         ),
