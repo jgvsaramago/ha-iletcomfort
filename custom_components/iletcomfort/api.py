@@ -256,6 +256,9 @@ class ITSStatus:
     # from ``mode``, which is power Off/Heat for this profile). None for every
     # other profile.
     operating_mode: str | None = None
+    # Aquapura Split Green only: the "Silence" quiet-mode toggle. None for
+    # every other profile.
+    silence: bool | None = None
     t5s_def: float | None = None
     t5s_max: float | None = None
     set_temperature: int = 0
@@ -807,6 +810,61 @@ class ILetComfortClient:
         )
         return decode_aquapura_split_green_daily_schedule(body)
 
+    def query_disinfection(
+        self, appliance_code: str, sn8: str | None = None,
+    ) -> Any:
+        """Query the Aquapura Split Green's "Desinfecção" (disinfection) settings.
+
+        Lives in the SAME 02,58 frame as the daily schedule (see
+        ``decode_aquapura_split_green_disinfection``), fetched with its own
+        command rather than sharing the schedule fetch's response, mirroring
+        how the tank/ODU sensors already cost two commands per poll. Only the
+        Aquapura Split Green (sn8 17186T3A) exposes this frame — every
+        other/unknown sn8 returns None without sending any command.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR,
+            ModelProfile,
+            decode_aquapura_split_green_disinfection,
+            resolve_profile,
+        )
+
+        if resolve_profile(sn8) is not ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return None
+
+        body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR,
+        )
+        return decode_aquapura_split_green_disinfection(body)
+
+    def set_disinfection(
+        self,
+        appliance_code: str,
+        *,
+        enabled: bool,
+        hour: int,
+        minute: int,
+        temp_c: float,
+        cycle_days: int,
+    ) -> dict[str, Any]:
+        """Send the Aquapura Split Green disinfection-settings write command.
+
+        The app always writes all five fields together (see
+        ``build_aquapura_split_green_disinfection_command``), so a caller that
+        only wants to change one (e.g. the enable switch) must pass the
+        current values for the rest — merge with a ``query_disinfection()``
+        result rather than guessing defaults.
+        """
+        from .model_profiles import build_aquapura_split_green_disinfection_command
+
+        command = build_aquapura_split_green_disinfection_command(
+            enabled=enabled, hour=hour, minute=minute,
+            temp_c=temp_c, cycle_days=cycle_days,
+        )
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {"sent": command, "response": response_hex, "effective_enabled": enabled}
+
     def _query_aquapura_split_green_frame(
         self, appliance_code: str, selector: tuple[int, int],
     ) -> bytearray:
@@ -888,6 +946,7 @@ class ILetComfortClient:
         power_on: bool = False,
         last_on_state: tuple[int, int] | None = None,
         operating_mode: str | None = None,
+        silence: bool | None = None,
     ) -> dict[str, Any]:
         """Send a SET command to the heat pump.
 
@@ -895,13 +954,14 @@ class ILetComfortClient:
         17100003) rejects the standard 62-byte C3 SET frame, so for that profile
         a captured short write command (``00 <field> 01 <value> ff``) is sent
         directly. The Aquapura Split Green (sn8 17186T3A) has captured power,
-        DHW-setpoint, and operating-mode ("Eco"/"Disparo", ``operating_mode``)
-        writes, each sent as its own single-field command — see
-        ``_set_device_aquapura_split_green``. Every other (unknown/None/ATW/
-        AQUAPURA) sn8 keeps the legacy build_c3_set path unchanged: query
-        current status for echo bytes, merge the requested changes, validate
-        temperature ranges, build and send the SET frame. ``operating_mode`` is
-        ignored by every profile except the Aquapura Split Green.
+        DHW-setpoint, operating-mode ("Eco"/"Disparo", ``operating_mode``), and
+        "Silence" quiet-mode (``silence``) writes, each sent as its own
+        single-field command — see ``_set_device_aquapura_split_green``. Every
+        other (unknown/None/ATW/AQUAPURA) sn8 keeps the legacy build_c3_set
+        path unchanged: query current status for echo bytes, merge the
+        requested changes, validate temperature ranges, build and send the SET
+        frame. ``operating_mode`` and ``silence`` are ignored by every profile
+        except the Aquapura Split Green.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
         from .model_profiles import ModelProfile, resolve_profile
@@ -921,6 +981,7 @@ class ILetComfortClient:
                 temperature=temperature,
                 power_on=power_on,
                 operating_mode=operating_mode,
+                silence=silence,
             )
 
         # Query current status for echo bytes
@@ -1042,15 +1103,17 @@ class ILetComfortClient:
         temperature: int | None,
         power_on: bool,
         operating_mode: str | None,
+        silence: bool | None = None,
     ) -> dict[str, Any]:
         """Send an Aquapura Split Green (sn8 17186T3A) write command.
 
         Every captured write for this model (power, DHW setpoint, "Eco"/
-        "Disparo" operating mode) is a single-field command — the app sends
-        one per user action, never combined — so this sends exactly one:
-        ``operating_mode`` takes priority (it's an independent axis from
-        power/temperature), then ``temperature``, then power on/off. This
-        mirrors ``_set_device_kjrh120l``'s "temperature takes priority over a
+        "Disparo" operating mode, "Silence" quiet mode) is a single-field
+        command — the app sends one per user action, never combined — so this
+        sends exactly one: ``silence`` takes priority (it's an independent
+        axis from everything else), then ``operating_mode``, then
+        ``temperature``, then power on/off. This mirrors
+        ``_set_device_kjrh120l``'s "temperature takes priority over a
         same-call mode change" rule.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
@@ -1058,13 +1121,17 @@ class ILetComfortClient:
             build_aquapura_split_green_operating_mode_command,
             build_aquapura_split_green_power_command,
             build_aquapura_split_green_setpoint_command,
+            build_aquapura_split_green_silence_command,
         )
 
-        if operating_mode is not None:
+        if silence is not None:
+            command = build_aquapura_split_green_silence_command(silence)
+            effective: dict[str, Any] = {"effective_silence": silence}
+        elif operating_mode is not None:
             command = build_aquapura_split_green_operating_mode_command(
                 operating_mode,
             )
-            effective: dict[str, Any] = {"effective_operating_mode": operating_mode}
+            effective = {"effective_operating_mode": operating_mode}
         elif temperature is not None:
             command = build_aquapura_split_green_setpoint_command(temperature)
             effective = {"effective_temp": temperature}

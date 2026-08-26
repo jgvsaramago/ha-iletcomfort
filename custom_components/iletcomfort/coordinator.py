@@ -304,12 +304,32 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 schedule = cached.get("schedule") or []
                 _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+
+            # Disinfection settings live in the same 02,58 frame as the daily
+            # schedule (see query_disinfection), so this fetch is gated on the
+            # same "Fetch daily schedule" option rather than adding a second
+            # toggle for what the app shows on the same config screen.
+            try:
+                disinfection = await self.hass.async_add_executor_job(
+                    self.client.query_disinfection, self.appliance_code, sn8,
+                )
+            except AuthError:
+                raise  # bubble up for re-auth
+            except Exception as err:
+                disinfection = cached.get("disinfection")
+                _LOGGER.debug("Disinfection query failed, using cache: %s", err)
         else:
             schedule = []
+            disinfection = None
 
         self._update_offline_repair()
 
-        return {"status": status, "sensors": sensors, "schedule": schedule}
+        return {
+            "status": status,
+            "sensors": sensors,
+            "schedule": schedule,
+            "disinfection": disinfection,
+        }
 
     def _update_offline_repair(self) -> None:
         """Surface or clear the 'device appears offline' Repair card.
@@ -445,5 +465,25 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     last_on_state=self._last_on_state,
                     **kwargs,
                 )
+            )
+        await self.async_request_refresh()
+
+    async def async_set_disinfection(self, **kwargs: Any) -> None:
+        """Send a disinfection-settings SET command with auto re-auth, then refresh data.
+
+        Callers (e.g. the Disinfection switch) must pass all five fields —
+        see ``ILetComfortClient.set_disinfection`` — merging in the current
+        values from ``self.data["disinfection"]`` for anything they didn't
+        change.
+        """
+        try:
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_disinfection(self.appliance_code, **kwargs)
+            )
+        except AuthError:
+            _LOGGER.info("Auth error during set, re-authenticating")
+            await self._async_login()
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_disinfection(self.appliance_code, **kwargs)
             )
         await self.async_request_refresh()

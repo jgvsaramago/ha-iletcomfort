@@ -31,7 +31,11 @@ from custom_components.iletcomfort.sensor import (
     SENSOR_DESCRIPTIONS,
     ILetComfortSensor,
 )
-from custom_components.iletcomfort.switch import ILetComfortBoostSwitch
+from custom_components.iletcomfort.switch import (
+    ILetComfortBoostSwitch,
+    ILetComfortDisinfectionSwitch,
+    ILetComfortSilenceSwitch,
+)
 
 
 def _coordinator(
@@ -68,6 +72,8 @@ def test_all_platforms_share_one_device(hass: HomeAssistant):
         ILetComfortBinarySensor(coord, BINARY_SENSOR_DESCRIPTIONS[0]),
         ILetComfortClimate(coord),
         ILetComfortBoostSwitch(coord),
+        ILetComfortSilenceSwitch(coord),
+        ILetComfortDisinfectionSwitch(coord),
         ILetComfortMuteSelect(coord),
     ]
 

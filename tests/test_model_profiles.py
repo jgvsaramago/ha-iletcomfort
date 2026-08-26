@@ -35,6 +35,7 @@ from custom_components.iletcomfort.model_profiles import (
     AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT,
     AQUAPURA_SPLIT_GREEN_SN8,
     ATW_SN8,
+    AquapuraSplitGreenDisinfectionSettings,
     AquapuraSplitGreenScheduleSlot,
     KJRH120L_DHW_OFF,
     KJRH120L_DHW_ON,
@@ -44,14 +45,17 @@ from custom_components.iletcomfort.model_profiles import (
     ModelProfile,
     apply_profile_to_sensors,
     apply_profile_to_status,
+    build_aquapura_split_green_disinfection_command,
     build_aquapura_split_green_operating_mode_command,
     build_aquapura_split_green_power_command,
     build_aquapura_split_green_query,
     build_aquapura_split_green_setpoint_command,
+    build_aquapura_split_green_silence_command,
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_aquapura_split_green_ambient_temp,
     decode_aquapura_split_green_daily_schedule,
+    decode_aquapura_split_green_disinfection,
     decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
     decode_aquapura_split_green_tank_temp,
@@ -716,6 +720,72 @@ def test_build_aquapura_split_green_operating_mode_command_rejects_unknown():
     with pytest.raises(ValueError, match="Unknown Aquapura Split Green operating mode"):
         build_aquapura_split_green_operating_mode_command("Boost")
 
+
+# Real "Silence" quiet-mode SET request + response pair, captured toggling
+# Silence on/off in the app (mitmproxy). Diffing the responses shows body[17]
+# is the ONLY thing that moves.
+AQUAPURA_SPLIT_GREEN_SILENCE_ON_COMMAND = (
+    "aa18c3000000000000020001f4ffffffff01ffff000e010123"
+)
+AQUAPURA_SPLIT_GREEN_SILENCE_OFF_COMMAND = (
+    "aa18c3000000000000020001f4ffffffff01ffff000e010024"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,01,f4,01,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,29"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,01,f4,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,2a"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_RAW[10:-1]
+)
+
+
+def test_aquapura_split_green_status_silence_from_real_capture_pair():
+    """body[17] is confirmed as the Silence toggle by a real ON/OFF capture pair.
+
+    Diffing the two responses (captured switching Silence on/off in the app)
+    shows it is the ONLY byte that changes.
+    """
+    silence_on = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_BODY,
+    )
+    silence_off = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_BODY,
+    )
+
+    assert AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_BODY[17] == 0x01
+    assert AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_BODY[17] == 0x00
+    assert silence_on.silence is True
+    assert silence_off.silence is False
+
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_BODY))
+        if AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_BODY[i]
+    ]
+    assert diffs == [17]
+    assert silence_on.t5s_def == silence_off.t5s_def
+    assert silence_on.operating_mode == silence_off.operating_mode
+    assert silence_on.mode == silence_off.mode
+
+
+def test_build_aquapura_split_green_silence_command_matches_captured_commands():
+    """Both captured Silence writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_silence_command(True)
+        == AQUAPURA_SPLIT_GREEN_SILENCE_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_silence_command(False)
+        == AQUAPURA_SPLIT_GREEN_SILENCE_OFF_COMMAND
+    )
+
 # Real TANK (selector 0x03,0x84) response frame from capture B, complete as
 # captured: raw idx40:41 = 0x01e7 = 48.7 °C, app showed 48.
 AQUAPURA_SPLIT_GREEN_TANK_RAW = _bytes(
@@ -1248,6 +1318,201 @@ def test_query_daily_schedule_other_profiles_send_no_command():
     send.assert_not_called()
 
 
+# Real disinfection ("Desinfecção") capture series, all in the same 02,58
+# frame as the daily schedule (selector shared, body[38:44] is a separate
+# region from the schedule slots at body[45+]). The app showed ON, 65°C,
+# 14:00, every 7 days when this series started. Each step below changed
+# EXACTLY the field named and nothing else — confirmed by diffing.
+AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,00,0e,00,02,8a,07,04,01,40,01,f4,0b,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,74"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,8a,07,04,01,40,01,f4,0b,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,73"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,a8,07,04,01,40,01,f4,0b,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,55"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0d,00,02,a8,07,04,01,40,01,f4,0b,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,56"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0d,00,02,a8,06,04,01,40,01,f4,0b,00,15,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,57"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_BODY = (
+    AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_BODY = (
+    AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_BODY = (
+    AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_BODY = (
+    AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_BODY = (
+    AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_RAW[10:-1]
+)
+
+AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_COMMAND = (
+    "aa29c300000000000002000258ffffffff01ffff"
+    "002401000025010e00260100002702028a0028010758"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_COMMAND = (
+    "aa29c300000000000002000258ffffffff01ffff"
+    "002401010025010e00260100002702028a0028010757"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_COMMAND = (
+    "aa29c300000000000002000258ffffffff01ffff"
+    "002401010025010e0026010000270202a80028010739"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_COMMAND = (
+    "aa29c300000000000002000258ffffffff01ffff"
+    "002401010025010d0026010000270202a8002801073a"
+)
+AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_COMMAND = (
+    "aa29c300000000000002000258ffffffff01ffff"
+    "002401010025010d0026010000270202a8002801063b"
+)
+
+
+def test_aquapura_split_green_disinfection_from_real_capture_series():
+    """Each step in the capture series changes EXACTLY one decoded field."""
+    off = decode_aquapura_split_green_disinfection(
+        AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_BODY,
+    )
+    on = decode_aquapura_split_green_disinfection(
+        AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_BODY,
+    )
+    temp68 = decode_aquapura_split_green_disinfection(
+        AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_BODY,
+    )
+    hour13 = decode_aquapura_split_green_disinfection(
+        AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_BODY,
+    )
+    cycle6 = decode_aquapura_split_green_disinfection(
+        AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_BODY,
+    )
+
+    assert off == AquapuraSplitGreenDisinfectionSettings(
+        enabled=False, hour=14, minute=0, temperature=65.0, cycle_days=7,
+    )
+    assert on == AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
+    )
+    assert temp68 == AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=14, minute=0, temperature=68.0, cycle_days=7,
+    )
+    assert hour13 == AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=13, minute=0, temperature=68.0, cycle_days=7,
+    )
+    assert cycle6 == AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=13, minute=0, temperature=68.0, cycle_days=6,
+    )
+
+    # off -> on: only body[38] (enable) differs.
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_BODY))
+        if AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_BODY[i]
+    ]
+    assert diffs == [38]
+
+
+def test_aquapura_split_green_disinfection_short_frame_returns_none():
+    """A frame too short to carry the disinfection block decodes to None
+    rather than a stub of defaults that could be mistaken for "disabled".
+    """
+    assert decode_aquapura_split_green_disinfection(bytes([0x00, 0x02, 0x58])) is None
+
+
+def test_build_aquapura_split_green_disinfection_command_matches_captured_commands():
+    """All 5 captured disinfection writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_disinfection_command(
+            enabled=False, hour=14, minute=0, temp_c=65, cycle_days=7,
+        )
+        == AQUAPURA_SPLIT_GREEN_DISINFECTION_OFF_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_disinfection_command(
+            enabled=True, hour=14, minute=0, temp_c=65, cycle_days=7,
+        )
+        == AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_disinfection_command(
+            enabled=True, hour=14, minute=0, temp_c=68, cycle_days=7,
+        )
+        == AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP68_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_disinfection_command(
+            enabled=True, hour=13, minute=0, temp_c=68, cycle_days=7,
+        )
+        == AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR13_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_disinfection_command(
+            enabled=True, hour=13, minute=0, temp_c=68, cycle_days=6,
+        )
+        == AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE6_COMMAND
+    )
+
+
+def test_query_disinfection_aquapura_split_green_sends_schedule_frame():
+    """query_disinfection with the Split Green sn8 sends 02,58 and decodes it."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_RAW.hex()) as send:
+        settings = client.query_disinfection("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x02, 0x58)],
+    )
+    assert settings == AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
+    )
+
+
+def test_query_disinfection_other_profiles_send_no_command():
+    """Devices without this frame cost nothing: no command sent, None returned."""
+    client = _make_client()
+    with patch_send(client, "should never be used") as send:
+        assert client.query_disinfection("APPL1", sn8=None) is None
+        assert client.query_disinfection("APPL1", sn8=ATW_SN8) is None
+        assert client.query_disinfection("APPL1", sn8=KJRH120L_SN8) is None
+
+    send.assert_not_called()
+
+
+def test_set_disinfection_sends_captured_command():
+    """set_disinfection sends the real captured multi-field write command."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_RAW.hex()) as send:
+        result = client.set_disinfection(
+            "APPL1", enabled=True, hour=14, minute=0, temp_c=65, cycle_days=7,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_COMMAND,
+    )
+    assert result["effective_enabled"] is True
+
+
 def test_aquapura_split_green_set_device_sends_captured_setpoint_command():
     """set_device sends the real captured setpoint-write command, not a guess.
 
@@ -1294,6 +1559,36 @@ def test_aquapura_split_green_set_device_sends_captured_operating_mode_command()
         "APPL1", AQUAPURA_SPLIT_GREEN_MODE_ECO_COMMAND,
     )
     assert result["effective_operating_mode"] == "Eco"
+
+
+def test_aquapura_split_green_set_device_sends_captured_silence_command():
+    """set_device sends the real captured Silence write command.
+
+    A future switch entity calls async_set_device(silence=...); this mirrors
+    that call shape and confirms it takes priority over a same-call
+    operating_mode/temperature/power request, since the app only ever writes
+    one field per action.
+    """
+    client = _make_client()
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_ON_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, silence=True,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_SILENCE_ON_COMMAND,
+    )
+    assert result["effective_silence"] is True
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_SILENCE_OFF_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+            silence=False, operating_mode="Eco", temperature=51, power_on=True,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_SILENCE_OFF_COMMAND,
+    )
+    assert result["effective_silence"] is False
 
 
 def test_aquapura_split_green_set_device_sends_captured_power_command():

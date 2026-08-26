@@ -480,6 +480,10 @@ AQUAPURA_SPLIT_GREEN_MODE_ON = 1
 # encoding as a daily-schedule slot's mode byte (confirmed by a real mode-
 # toggle capture pair — see module notes).
 AQUAPURA_SPLIT_GREEN_OPERATING_MODE_INDEX = 14
+# STATUS body[17] = the "Silence" quiet-mode toggle: 0x00 Off, 0x01 On
+# (confirmed by diffing a real Silence ON/OFF capture pair). Independent of
+# ``operating_mode`` (Eco/Disparo) — same field table shape as power.
+AQUAPURA_SPLIT_GREEN_SILENCE_INDEX = 17
 
 # Setpoint range the climate entity clamps to for this profile. No app-
 # confirmed limit capture exists yet; this reuses the KJRH-120L's validated
@@ -493,6 +497,7 @@ AQUAPURA_SPLIT_GREEN_TEMP_MAX = 70
 AQUAPURA_SPLIT_GREEN_FIELD_POWER = 0x0B
 AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE = 0x0C
 AQUAPURA_SPLIT_GREEN_FIELD_SETPOINT = 0x0D
+AQUAPURA_SPLIT_GREEN_FIELD_SILENCE = 0x0E
 
 # Operating-mode marker byte -> app label, shared by the live STATUS frame
 # (body[14]) and a daily-schedule slot's mode byte (slot offset +1) — both
@@ -572,10 +577,11 @@ def decode_aquapura_split_green_status(body: bytearray | bytes) -> ITSStatus:
     Surfaces the live DHW setpoint at body[15:17] (16-bit BE tenths °C, NOT
     body[27] — see module notes for the correction) through ``t5s_def`` (which
     the climate entity's target_temperature reads) and ``set_temperature``; the
-    power state at body[13] through ``mode``/``mode_name``; and the "Eco"/
-    "Disparo" operating preset at body[14] through ``operating_mode``. All
-    three are confirmed by diffing real before/after capture pairs (see module
-    notes above).
+    power state at body[13] through ``mode``/``mode_name``; the "Eco"/
+    "Disparo" operating preset at body[14] through ``operating_mode``; and the
+    "Silence" quiet-mode toggle at body[17] through ``silence``. All are
+    confirmed by diffing real before/after capture pairs (see module notes
+    above).
     """
     status = ITSStatus()
     status.raw_body = bytes(body)
@@ -598,6 +604,9 @@ def decode_aquapura_split_green_status(body: bytearray | bytes) -> ITSStatus:
         status.operating_mode = _AQUAPURA_SPLIT_GREEN_MODE_MARKERS.get(
             marker, f"Unknown(0x{marker:02x})",
         )
+
+    if len(body) > AQUAPURA_SPLIT_GREEN_SILENCE_INDEX:
+        status.silence = body[AQUAPURA_SPLIT_GREEN_SILENCE_INDEX] != 0
 
     setpoint = _aquapura_split_green_temp16(
         bytes(body), AQUAPURA_SPLIT_GREEN_SETPOINT_INDEX,
@@ -667,6 +676,21 @@ def build_aquapura_split_green_operating_mode_command(mode: str) -> str:
         )
     return _build_aquapura_split_green_write(
         AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE, bytes([marker]),
+    )
+
+
+def build_aquapura_split_green_silence_command(silence_on: bool) -> str:
+    """Return the Aquapura Split Green "Silence" quiet-mode ON/OFF write command.
+
+    Captured toggling Silence in the app (mitmproxy); reproduces both
+    captures byte-exact:
+    ``build_aquapura_split_green_silence_command(True)``  ->
+      ``aa18c3000000000000020001f4ffffffff01ffff000e010123``
+    ``build_aquapura_split_green_silence_command(False)`` ->
+      ``aa18c3000000000000020001f4ffffffff01ffff000e010024``
+    """
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_SILENCE, bytes([0x01 if silence_on else 0x00]),
     )
 
 
@@ -803,6 +827,116 @@ def decode_aquapura_split_green_daily_schedule(
     return slots
 
 
+# Disinfection ("Desinfecção") settings, packed in the SAME 02,58 frame as the
+# daily schedule, just before the first schedule slot (body[45]). Confirmed by
+# a real capture series: opening the app's Desinfecção submenu (ON, 65 °C,
+# 14:00, every 7 days) matched body[38:44] exactly, and four further captures
+# — enable ON->OFF, temp 65->68 °C, hour 14->13, cycle 7->6 — each changed
+# EXACTLY the one corresponding byte and nothing else:
+#   body[38]    = enabled (0x00/0x01)
+#   body[39:41] = hour, minute (direct, e.g. 0x0e,0x00 -> "14:00")
+#   body[41:43] = temperature, 16-bit BE tenths of °C (0x028a -> 65.0)
+#   body[43]    = cycle days (0x07 -> every 7 days)
+# body[44] (constant 0x04 across every capture) is left unmapped — no
+# confirmed meaning.
+AQUAPURA_SPLIT_GREEN_DISINFECTION_ENABLE_INDEX = 38
+AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR_INDEX = 39
+AQUAPURA_SPLIT_GREEN_DISINFECTION_MINUTE_INDEX = 40
+AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP_INDEX = 41
+AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE_DAYS_INDEX = 43
+
+# Write-command field ids for the disinfection SET frame (selector 0x02,0x58,
+# same header shape as the STATUS-selector writes but with FIVE fields sent
+# together — the app always resends every field, not just the one the user
+# changed). See build_aquapura_split_green_disinfection_command.
+AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_ENABLE = 0x24
+AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_HOUR = 0x25
+AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_MINUTE = 0x26
+AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_TEMP = 0x27
+AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_CYCLE_DAYS = 0x28
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class AquapuraSplitGreenDisinfectionSettings:
+    """Aquapura Split Green "Desinfecção" (disinfection) settings."""
+
+    enabled: bool = False
+    hour: int = 0
+    minute: int = 0
+    temperature: float = 0.0
+    cycle_days: int = 0
+
+
+def decode_aquapura_split_green_disinfection(
+    body: bytearray | bytes,
+) -> AquapuraSplitGreenDisinfectionSettings | None:
+    """Decode the disinfection settings from a Split Green 02,58 frame.
+
+    None if the frame is too short to carry them (rather than a stub of
+    defaults, which would read as "disinfection off" and could mislead a
+    caller merging these into a write).
+    """
+    if len(body) <= AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE_DAYS_INDEX:
+        return None
+    temp_hi = body[AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP_INDEX]
+    temp_lo = body[AQUAPURA_SPLIT_GREEN_DISINFECTION_TEMP_INDEX + 1]
+    return AquapuraSplitGreenDisinfectionSettings(
+        enabled=body[AQUAPURA_SPLIT_GREEN_DISINFECTION_ENABLE_INDEX] != 0,
+        hour=body[AQUAPURA_SPLIT_GREEN_DISINFECTION_HOUR_INDEX],
+        minute=body[AQUAPURA_SPLIT_GREEN_DISINFECTION_MINUTE_INDEX],
+        temperature=((temp_hi << 8) | temp_lo) / 10,
+        cycle_days=body[AQUAPURA_SPLIT_GREEN_DISINFECTION_CYCLE_DAYS_INDEX],
+    )
+
+
+def build_aquapura_split_green_disinfection_command(
+    *, enabled: bool, hour: int, minute: int, temp_c: float, cycle_days: int,
+) -> str:
+    """Return the Aquapura Split Green disinfection-settings write command.
+
+    Unlike the single-field STATUS-selector writes, the app always sends all
+    five fields together in one selector-0x02,0x58 command, so every caller
+    must supply the full set (merge with the last known values for the ones
+    the user didn't change). Each field entry is ``id, len, value...``,
+    padded with one extra ``0x00`` byte — EXCEPT the last field, which has
+    none; this was confirmed byte-for-byte, not guessed, against 5 real
+    captures (enable ON<->OFF, temp 65->68, hour 14->13, cycle 7->6):
+    ``build_aquapura_split_green_disinfection_command(enabled=False, hour=14, minute=0, temp_c=65, cycle_days=7)``
+        -> ``aa29c300000000000002000258ffffffff01ffff002401000025010e00260100002702028a0028010758``
+    ``build_aquapura_split_green_disinfection_command(enabled=True, hour=14, minute=0, temp_c=65, cycle_days=7)``
+        -> ``aa29c300000000000002000258ffffffff01ffff002401010025010e00260100002702028a0028010757``
+    ``build_aquapura_split_green_disinfection_command(enabled=True, hour=14, minute=0, temp_c=68, cycle_days=7)``
+        -> ``aa29c300000000000002000258ffffffff01ffff002401010025010e0026010000270202a80028010739``
+    ``build_aquapura_split_green_disinfection_command(enabled=True, hour=13, minute=0, temp_c=68, cycle_days=7)``
+        -> ``aa29c300000000000002000258ffffffff01ffff002401010025010d0026010000270202a8002801073a``
+    ``build_aquapura_split_green_disinfection_command(enabled=True, hour=13, minute=0, temp_c=68, cycle_days=6)``
+        -> ``aa29c300000000000002000258ffffffff01ffff002401010025010d0026010000270202a8002801063b``
+    """
+    prefix = [
+        0xAA, 0x00, 0xC3,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00,
+        0x02, 0x58,
+        0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0x00,
+    ]
+    tenths = round(temp_c * 10)
+    fields = [
+        (AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_ENABLE, [0x01 if enabled else 0x00]),
+        (AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_HOUR, [hour]),
+        (AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_MINUTE, [minute]),
+        (AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_TEMP, list(tenths.to_bytes(2, "big"))),
+        (AQUAPURA_SPLIT_GREEN_FIELD_DISINFECTION_CYCLE_DAYS, [cycle_days]),
+    ]
+    frame = list(prefix)
+    for i, (field_id, value) in enumerate(fields):
+        frame += [field_id, len(value), *value]
+        if i != len(fields) - 1:
+            frame.append(0x00)
+    frame[1] = len(frame)
+    frame.append((~sum(frame[1:]) + 1) & 0xFF)
+    return bytes(frame).hex()
+
+
 def apply_profile_to_status(profile: ModelProfile, status: ITSStatus) -> ITSStatus:
     """Return the profile-canonical ITSStatus for a decoded status object.
 
@@ -877,6 +1011,7 @@ __all__ = [
     "AQUAPURA_SPLIT_GREEN_TANK_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_TEMP_MAX",
     "AQUAPURA_SPLIT_GREEN_TEMP_MIN",
+    "AquapuraSplitGreenDisinfectionSettings",
     "AquapuraSplitGreenScheduleSlot",
     "KJRH120L_DHW_OFF",
     "KJRH120L_DHW_ON",
@@ -888,12 +1023,15 @@ __all__ = [
     "apply_profile_to_status",
     "build_aquapura_split_green_operating_mode_command",
     "build_aquapura_split_green_power_command",
+    "build_aquapura_split_green_disinfection_command",
     "build_aquapura_split_green_query",
     "build_aquapura_split_green_setpoint_command",
+    "build_aquapura_split_green_silence_command",
     "build_kjrh120l_set_temperature",
     "build_query_command",
     "decode_aquapura_split_green_ambient_temp",
     "decode_aquapura_split_green_daily_schedule",
+    "decode_aquapura_split_green_disinfection",
     "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
     "decode_aquapura_split_green_tank_temp",

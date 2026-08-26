@@ -190,22 +190,57 @@ and, in `climate.py`, as the climate entity's **preset_mode** (`AQUAPURA_SPLIT_G
 unconditionally on the single shared `ILetComfortClimate` class, like `hvac_modes`; other profiles never
 populate `operating_mode`, so `preset_mode` just reads `None` (no preset) for them.
 
-**Writes — all confirmed.** Every captured write (power, operating mode, setpoint) shares ONE frame shape,
-differing only in field id / value length / value:
+**Writes — all confirmed.** Every captured single-field write (power, operating mode, setpoint, silence)
+shares ONE frame shape, differing only in field id / value length / value:
 
     aa <len> c3 00×6 02 00 01 f4 ff ff ff ff 01 ff ff 00 <fld> <vlen> <value...> <cks>
 
     fld 0x0b, vlen 1: power        (0x01 On / 0x00 Off)
     fld 0x0c, vlen 1: op. mode     (0x40 Eco / 0x80 Disparo)
     fld 0x0d, vlen 2: DHW setpoint (16-bit BE tenths °C, e.g. 0x01fe = 51.0)
+    fld 0x0e, vlen 1: silence      (0x01 On / 0x00 Off)
 
-Confirmed byte-exact against 7 real captures (2 power, 2 mode, 3 setpoint: 50→51→52→50) via
+Confirmed byte-exact against 9 real captures (2 power, 2 mode, 3 setpoint: 50→51→52→50, 2 silence) via
 `_build_aquapura_split_green_write`. Same checksum formula as the query frames. header[9] = `0x02` here (a
 SET/control request) vs `0x03` for a plain query — this also explains an earlier oddity: a schedule-frame
 capture taken right after an app write also had raw[9]=`0x02`, most likely echoing "this exchange involved
-a write", not a data field. `api.py`'s `_set_device_aquapura_split_green` wires all three in, with priority
-`operating_mode` > `temperature` > power on/off (the app only ever writes one field per action, so this
-priority is defensive rather than load-bearing — mirrors `_set_device_kjrh120l`'s equivalent rule).
+a write", not a data field. `api.py`'s `_set_device_aquapura_split_green` wires all four in, with priority
+`silence` > `operating_mode` > `temperature` > power on/off (the app only ever writes one field per action,
+so this priority is defensive rather than load-bearing — mirrors `_set_device_kjrh120l`'s equivalent rule).
+
+**Silence (quiet mode) — confirmed.** A real ON/OFF mitmproxy capture pair pins **STATUS body[17]** as the
+toggle (`0x00`=Off, `0x01`=On) — diffing the two response frames shows it's the only byte that changes.
+Surfaced on `ITSStatus.silence` (a field only this profile populates) and, in `switch.py`, as the
+**Silence** switch — declared unconditionally like the Boost switch; other profiles never populate
+`silence`, so `is_on` just reads `False` for them.
+
+**Disinfection ("Desinfecção") — confirmed, DIFFERENT frame shape from the single-field writes above.**
+Lives in the **02,58 frame** (the same selector as the daily schedule — see § above), at
+`body[38:44]`, right before the first schedule slot (`body[45]`):
+
+    body[38]    = enabled (0x00/0x01)
+    body[39:41] = hour, minute (direct, e.g. 0x0e,0x00 -> "14:00")
+    body[41:43] = temperature, 16-bit BE tenths °C (0x028a -> 65.0)
+    body[43]    = cycle days (0x07 -> every 7 days)
+
+Confirmed by a 5-capture series (open the app's Desinfecção submenu, then toggle ON→OFF, change temp
+65→68 °C, change hour 14→13, change cycle 7→6): each step changed **exactly** the one corresponding byte.
+`body[44]` (constant `0x04` throughout) is left unmapped. The **write** frame is a genuinely different
+shape from the single-field writes: the app always sends **all five fields together**, and each field
+entry is padded with one extra `0x00` byte — **except the last field**, which has none:
+
+    aa <len> c3 00×6 02 00 02 58 ff ff ff ff 01 ff ff 00
+        24 01 <enabled> 00  25 01 <hour> 00  26 01 <minute> 00  27 02 <temp hi> <temp lo> 00  28 01 <cycle> <cks>
+
+`build_aquapura_split_green_disinfection_command` reproduces this byte-exact. Because the write always
+carries every field, a caller changing only `enabled` (the **Disinfection** switch) must merge in the
+current hour/minute/temperature/cycle_days — it does NOT default them, since sending zeros would actually
+reset the device's real schedule. `api.py`'s `query_disinfection`/`set_disinfection` and
+`coordinator.async_set_disinfection` implement this; the switch reads current values from
+`coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. Gated on
+the same `CONF_FETCH_SCHEDULE` option as the daily schedule (same source frame, same "extra poll" cost
+tradeoff), so it costs one extra command per poll — the tank/ODU sensors already established two commands
+per poll as an accepted cost for this profile.
 
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real

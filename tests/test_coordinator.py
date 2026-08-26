@@ -480,6 +480,7 @@ async def test_poll_skips_schedule_fetch_when_disabled(hass: HomeAssistant):
     client.query_sensors.return_value = ITSSensors()
     coord.data = {
         "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [object()],
+        "disinfection": object(),
     }
 
     with patch(
@@ -489,7 +490,9 @@ async def test_poll_skips_schedule_fetch_when_disabled(hass: HomeAssistant):
         result = await coord._poll()
 
     client.query_daily_schedule.assert_not_called()
+    client.query_disinfection.assert_not_called()
     assert result["schedule"] == []
+    assert result["disinfection"] is None
 
 
 async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant):
@@ -516,6 +519,65 @@ async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant)
 
     client.query_daily_schedule.assert_called_once_with("APPL1", "17186T3A")
     assert result["schedule"] is schedule
+
+
+async def test_poll_fetches_disinfection_and_forwards_sn8(hass: HomeAssistant):
+    """A poll fetches disinfection settings and threads sn8 to it, alongside schedule."""
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    disinfection = object()
+    client.query_disinfection.return_value = disinfection
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    client.query_disinfection.assert_called_once_with("APPL1", "17186T3A")
+    assert result["disinfection"] is disinfection
+
+
+async def test_poll_disinfection_failure_falls_back_to_cache(hass: HomeAssistant):
+    """A disinfection-fetch failure keeps the cached settings, not None.
+
+    This is bonus config data (not core status/sensors), so it degrades
+    quietly to cache rather than raising or blanking the Disinfection switch.
+    """
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=0)
+    client.query_sensors.return_value = ITSSensors()
+    cached_disinfection = object()
+    coord.data = {
+        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [],
+        "disinfection": cached_disinfection,
+    }
+    client.query_disinfection.side_effect = ApiError("code=1214, msg=System error")
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    assert result["disinfection"] is cached_disinfection
+    assert result["status"].mode == 0
 
 
 async def test_poll_daily_schedule_failure_falls_back_to_cache(hass: HomeAssistant):
@@ -596,6 +658,29 @@ async def test_async_set_device_threads_sn8_to_client(hass: HomeAssistant):
     assert client.set_device.call_args.args == ("APPL1",)
     assert client.set_device.call_args.kwargs["sn8"] == "17100003"
     assert client.set_device.call_args.kwargs["temperature"] == 60
+
+
+async def test_async_set_disinfection_forwards_to_client(hass: HomeAssistant):
+    """The Disinfection switch's write path forwards straight to the client."""
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    coord.async_request_refresh = AsyncMock()
+
+    await coord.async_set_disinfection(
+        enabled=False, hour=14, minute=0, temp_c=65.0, cycle_days=7,
+    )
+
+    assert client.set_disinfection.call_args.args == ("APPL1",)
+    assert client.set_disinfection.call_args.kwargs == {
+        "enabled": False, "hour": 14, "minute": 0, "temp_c": 65.0, "cycle_days": 7,
+    }
+    coord.async_request_refresh.assert_awaited_once()
 
 
 def _degraded_coordinator(hass: HomeAssistant) -> tuple[ILetComfortCoordinator, MagicMock]:
