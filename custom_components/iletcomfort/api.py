@@ -737,7 +737,10 @@ class ILetComfortClient:
         return apply_profile_to_status(profile, status)
 
     def query_sensors(
-        self, appliance_code: str, sn8: str | None = None,
+        self,
+        appliance_code: str,
+        sn8: str | None = None,
+        fetch_diagnostics: bool = True,
     ) -> ITSSensors:
         """Query heat pump sensors (subtype 0x02).
 
@@ -746,6 +749,12 @@ class ILetComfortClient:
         ``ffff<ss><ss><ss>ff`` form. The Aquapura Split Green splits its readings
         across two selector frames and is handled separately. Unknown/None sn8
         uses the standard frame.
+
+        ``fetch_diagnostics`` gates only the Aquapura Split Green's SECOND
+        query (the ODU/ambient frame) — every other profile's sensors query is
+        already a single command regardless of this flag. Disabling it saves
+        one cloud command per poll at the cost of the Outdoor Ambient
+        Temperature sensor (see ``_query_aquapura_split_green_sensors``).
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
         from .model_profiles import (
@@ -756,7 +765,9 @@ class ILetComfortClient:
 
         profile = resolve_profile(sn8)
         if profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
-            return self._query_aquapura_split_green_sensors(appliance_code)
+            return self._query_aquapura_split_green_sensors(
+                appliance_code, fetch_odu=fetch_diagnostics,
+            )
 
         command = build_query_command(profile, 0x02)
         response_hex = self.send_hex_command(appliance_code, command)
@@ -814,7 +825,7 @@ class ILetComfortClient:
         return body
 
     def _query_aquapura_split_green_sensors(
-        self, appliance_code: str,
+        self, appliance_code: str, *, fetch_odu: bool = True,
     ) -> ITSSensors:
         """Fetch and merge the Aquapura Split Green's two sensor frames.
 
@@ -822,10 +833,12 @@ class ILetComfortClient:
         is in the 03,84 frame and the outdoor ambient in the 03,e8 ODU frame, so
         one sensors poll costs two commands.
 
-        The ODU fetch is best-effort. Its only confirmed field is the ambient,
-        while the tank temperature backs the climate entity's current
-        temperature — so a failed/echoed ODU frame must not fail the whole poll
-        and push the coordinator onto its cached-data fallback. AuthError still
+        The ODU fetch is best-effort AND user-skippable via ``fetch_odu``
+        (options flow "Fetch diagnostic sensor data", to reduce cloud API
+        calls). Its only confirmed field is the ambient, while the tank
+        temperature backs the climate entity's current temperature — so a
+        failed/echoed/skipped ODU frame must not fail the whole poll and push
+        the coordinator onto its cached-data fallback. AuthError still
         propagates: the coordinator needs it to re-authenticate.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
@@ -846,18 +859,19 @@ class ILetComfortClient:
             )
 
         odu_body: bytearray | None = None
-        try:
-            odu_body = self._query_aquapura_split_green_frame(
-                appliance_code, AQUAPURA_SPLIT_GREEN_ODU_SELECTOR,
-            )
-        except AuthError:
-            raise
-        except Exception as err:  # noqa: BLE001 - best-effort secondary frame
-            _LOGGER.debug(
-                "Aquapura Split Green ODU frame query failed (%s); outdoor "
-                "ambient will be unavailable this poll",
-                err,
-            )
+        if fetch_odu:
+            try:
+                odu_body = self._query_aquapura_split_green_frame(
+                    appliance_code, AQUAPURA_SPLIT_GREEN_ODU_SELECTOR,
+                )
+            except AuthError:
+                raise
+            except Exception as err:  # noqa: BLE001 - best-effort secondary frame
+                _LOGGER.debug(
+                    "Aquapura Split Green ODU frame query failed (%s); outdoor "
+                    "ambient will be unavailable this poll",
+                    err,
+                )
 
         return decode_aquapura_split_green_sensors(tank_body, odu_body)
 

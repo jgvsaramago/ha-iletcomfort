@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from datetime import timedelta
+
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -12,7 +14,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.iletcomfort.api import ApiError, ITSSensors, ITSStatus
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
+    CONF_FETCH_DIAGNOSTICS,
+    CONF_FETCH_SCHEDULE,
     CONF_REGION,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     REGION_EU,
     REGION_US,
@@ -25,7 +30,7 @@ from custom_components.iletcomfort.coordinator import (
 )
 
 
-def _entry(region: str | None) -> MockConfigEntry:
+def _entry(region: str | None, options: dict | None = None) -> MockConfigEntry:
     data = {
         CONF_EMAIL: "user@example.com",
         CONF_PASSWORD: "secret",
@@ -37,6 +42,7 @@ def _entry(region: str | None) -> MockConfigEntry:
         domain=DOMAIN,
         unique_id=f"user@example.com:APPL1",
         data=data,
+        options=options or {},
         version=2,
     )
 
@@ -402,11 +408,88 @@ async def test_poll_passes_sn8_and_applies_atw_overrides(hass: HomeAssistant):
 
     # sn8 must be forwarded to both queries (so KJRH-120L gets the short cmd).
     assert client.query_status.call_args.args == ("APPL1", "171H120F")
-    assert client.query_sensors.call_args.args == ("APPL1", "171H120F")
+    assert client.query_sensors.call_args.args == ("APPL1", "171H120F", True)
     # th_temp (DHW Tank Temperature sensor) now reflects the tank reading.
     assert result["sensors"].th_temp == 46.0
     # Water Inlet (twin_temp) stays honest — never the tank value.
     assert result["sensors"].twin_temp != 46.0
+
+
+def test_coordinator_uses_scan_interval_from_options(hass: HomeAssistant):
+    """A saved scan_interval option drives the coordinator's poll interval."""
+    entry = _entry(REGION_US, options={CONF_SCAN_INTERVAL: 90})
+    entry.add_to_hass(hass)
+    with patch("custom_components.iletcomfort.coordinator.ILetComfortClient"):
+        coord = ILetComfortCoordinator(hass, entry)
+
+    assert coord.update_interval == timedelta(seconds=90)
+
+
+def test_coordinator_defaults_scan_interval_when_no_options(hass: HomeAssistant):
+    """No saved option -> DEFAULT_SCAN_INTERVAL (60s), unchanged behavior."""
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch("custom_components.iletcomfort.coordinator.ILetComfortClient"):
+        coord = ILetComfortCoordinator(hass, entry)
+
+    assert coord.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+
+
+async def test_poll_forwards_fetch_diagnostics_option_to_query_sensors(
+    hass: HomeAssistant,
+):
+    """Disabling 'Fetch diagnostic sensor data' forwards False to query_sensors.
+
+    This only changes behavior for the Aquapura Split Green (skips its second,
+    ODU/ambient command) -- every other profile's query_sensors call already
+    ignores this flag, so forwarding it is harmless for them.
+    """
+    entry = _entry(REGION_US, options={CONF_FETCH_DIAGNOSTICS: False})
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=1)
+    client.query_sensors.return_value = ITSSensors()
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        await coord._poll()
+
+    assert client.query_sensors.call_args.args == ("APPL1", None, False)
+
+
+async def test_poll_skips_schedule_fetch_when_disabled(hass: HomeAssistant):
+    """Disabling 'Fetch daily schedule' skips the network call entirely and
+    returns an empty schedule, not a stale cached one.
+    """
+    entry = _entry(REGION_US, options={CONF_FETCH_SCHEDULE: False})
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    client.query_status.return_value = ITSStatus(mode=1)
+    client.query_sensors.return_value = ITSSensors()
+    coord.data = {
+        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [object()],
+    }
+
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await coord._poll()
+
+    client.query_daily_schedule.assert_not_called()
+    assert result["schedule"] == []
 
 
 async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant):
@@ -489,7 +572,7 @@ async def test_poll_standard_leaves_sensors_untouched(hass: HomeAssistant):
         result = await coord._poll()
 
     assert client.query_status.call_args.args == ("APPL1", None)
-    assert client.query_sensors.call_args.args == ("APPL1", None)
+    assert client.query_sensors.call_args.args == ("APPL1", None, True)
     assert result["sensors"] is sensors  # STANDARD is a no-op (object identity)
     assert result["sensors"].twin_temp == 12.0  # unchanged by STANDARD
 

@@ -15,3 +15,13 @@ REGION_URLS = {
 DEFAULT_REGION = REGION_US
 
 DEFAULT_SCAN_INTERVAL = 60
+# Sane floor so the options flow can't be used to hammer the vendor cloud.
+MIN_SCAN_INTERVAL = 30
+
+# Per-poll fetch toggles (options flow). Both only affect the Aquapura Split
+# Green profile (sn8 17186T3A): every other profile's status/sensors poll is
+# already the minimum two commands regardless of these settings.
+CONF_FETCH_DIAGNOSTICS = "fetch_diagnostics"
+CONF_FETCH_SCHEDULE = "fetch_schedule"
+DEFAULT_FETCH_DIAGNOSTICS = True
+DEFAULT_FETCH_SCHEDULE = True

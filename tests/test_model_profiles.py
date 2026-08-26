@@ -1070,6 +1070,43 @@ def test_query_sensors_aquapura_split_green_survives_odu_failure():
     assert sensors.t4_temp is None
 
 
+def test_query_sensors_aquapura_split_green_skips_odu_when_diagnostics_disabled():
+    """fetch_diagnostics=False must skip the ODU call entirely, not just
+    tolerate its failure -- this is the options-flow "reduce API calls" path,
+    distinct from the best-effort failure path above.
+    """
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_TANK_RAW.hex()) as send:
+        sensors = client.query_sensors(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, fetch_diagnostics=False,
+        )
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x84)],
+    )
+    assert sensors.th_temp == 48.7
+    assert sensors.t4_temp is None
+
+
+def test_query_sensors_non_aquapura_split_green_ignores_fetch_diagnostics():
+    """fetch_diagnostics is a no-op for every other profile: their sensors
+    query is already a single command regardless of this flag.
+    """
+    client = _make_client()
+    with patch_send(client, _c3_frame(ISSUE_11_SENSORS_BODY)) as send:
+        sensors_true = client.query_sensors(
+            "APPL1", sn8=None, fetch_diagnostics=True,
+        )
+    with patch_send(client, _c3_frame(ISSUE_11_SENSORS_BODY)) as send_false:
+        sensors_false = client.query_sensors(
+            "APPL1", sn8=None, fetch_diagnostics=False,
+        )
+
+    send.assert_called_once()
+    send_false.assert_called_once()
+    assert sensors_true.twin_temp == sensors_false.twin_temp
+
+
 # Real DAILY SCHEDULE (selector 0x02,0x58, "Tempor. diário") response frame,
 # complete as captured. Validated byte-for-byte against a live app screenshot
 # showing all 4 "Temporiz." slots:

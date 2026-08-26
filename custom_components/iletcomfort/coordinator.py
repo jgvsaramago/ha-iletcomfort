@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -25,7 +25,11 @@ from .api import (
 )
 from .const import (
     CONF_APPLIANCE_CODE,
+    CONF_FETCH_DIAGNOSTICS,
+    CONF_FETCH_SCHEDULE,
     CONF_REGION,
+    DEFAULT_FETCH_DIAGNOSTICS,
+    DEFAULT_FETCH_SCHEDULE,
     DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -57,17 +61,26 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls the iLetComfort cloud API."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+            update_interval=timedelta(seconds=scan_interval),
         )
         self.entry = entry
         region = entry.data.get(CONF_REGION, DEFAULT_REGION)
         api_base = REGION_URLS.get(region, REGION_URLS[DEFAULT_REGION])
         self.client = ILetComfortClient(api_base=api_base)
         self.appliance_code: str = entry.data.get(CONF_APPLIANCE_CODE, "")
+        # Per-poll fetch toggles (options flow). Both only affect the
+        # Aquapura Split Green profile — see _poll() and query_sensors().
+        self._fetch_diagnostics: bool = entry.options.get(
+            CONF_FETCH_DIAGNOSTICS, DEFAULT_FETCH_DIAGNOSTICS,
+        )
+        self._fetch_schedule: bool = entry.options.get(
+            CONF_FETCH_SCHEDULE, DEFAULT_FETCH_SCHEDULE,
+        )
         # Cloud metadata for this appliance (applianceType, modelNumber, sn8, …),
         # fetched once and surfaced in diagnostics only. See
         # ``_ensure_appliance_meta``.
@@ -189,7 +202,10 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         try:
             sensors: ITSSensors = await self.hass.async_add_executor_job(
-                self.client.query_sensors, self.appliance_code, sn8,
+                self.client.query_sensors,
+                self.appliance_code,
+                sn8,
+                self._fetch_diagnostics,
             )
             self._sensors_degraded = False
             self._sensors_fail_streak = self._note_query_recovery(
@@ -259,16 +275,22 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # to fetch (query_daily_schedule returns [] with no network call for
         # every other profile). A failure here is bonus config data, not core
         # status/sensors, so it stays at DEBUG and never trips the offline
-        # Repair card or a cache-fallback WARNING.
-        try:
-            schedule = await self.hass.async_add_executor_job(
-                self.client.query_daily_schedule, self.appliance_code, sn8,
-            )
-        except AuthError:
-            raise  # bubble up for re-auth
-        except Exception as err:
-            schedule = cached.get("schedule") or []
-            _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+        # Repair card or a cache-fallback WARNING. The user can disable this
+        # fetch entirely (options flow) to save one cloud command per poll;
+        # when disabled the schedule entities read unavailable rather than a
+        # stale cached value.
+        if self._fetch_schedule:
+            try:
+                schedule = await self.hass.async_add_executor_job(
+                    self.client.query_daily_schedule, self.appliance_code, sn8,
+                )
+            except AuthError:
+                raise  # bubble up for re-auth
+            except Exception as err:
+                schedule = cached.get("schedule") or []
+                _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
+        else:
+            schedule = []
 
         self._update_offline_repair()
 

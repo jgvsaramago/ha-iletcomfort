@@ -237,11 +237,41 @@ priority is defensive rather than load-bearing — mirrors `_set_device_kjrh120l
 |------|----------------|
 | `api.py` | `ILetComfortClient` (login, `list_appliances`, `send_hex_command`, `query_status`/`query_sensors`); frame build/parse (`build_c3_query`, `build_c3_set`, `parse_hex_response`, `extract_c3_body`); decoders `decode_its_status`/`decode_its_sensors` + dataclasses `ITSStatus`/`ITSSensors`; `_temp_offset`; `AuthError`/`ApiError`. |
 | `model_profiles.py` | `ModelProfile` enum, `_SN8_PROFILES` table, `resolve_profile`, `decode_atw_status`, `apply_profile_to_status`, `apply_profile_to_sensors`. **Add new model support here.** |
-| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. |
+| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. Reads `entry.options` for poll interval + fetch toggles (§7). |
 | `diagnostics.py` | Redacted snapshot: raw frames, decoded status/sensors, `sensors_temperature_scan` (per-byte `_temp_offset` map — use it to find a model's misplaced temp byte), and the `appliance` metadata block. `APPLIANCE_TO_REDACT = {owner, sn, name}` (keeps `applianceType`/`modelNumber`/`sn8`). |
 | `climate.py` / `sensor.py` / `binary_sensor.py` / `switch.py` / `select.py` | HA entities. See §4 for which field backs which entity. |
-| `config_flow.py` / `__init__.py` / `const.py` / `entity.py` | Setup, entry, constants, base entity. |
+| `config_flow.py` / `__init__.py` / `const.py` / `entity.py` | Setup, entry, constants, base entity, options flow (§7). |
 | `tests/` | pytest suite; real captured frames are pinned as fixtures (e.g. issue-#11 frames for STANDARD regression). |
+
+---
+
+## 6a. Options flow (poll interval, per-poll fetch toggles)
+
+`config_flow.py`'s `ILetComfortOptionsFlow` (accessed via the integration's **Configure** button) exposes
+three settings, all under `entry.options` (never `entry.data` — options don't require re-auth):
+- `scan_interval` (`homeassistant.const.CONF_SCAN_INTERVAL`, default `DEFAULT_SCAN_INTERVAL`=60s, floor
+  `MIN_SCAN_INTERVAL`=30s) — the coordinator's `update_interval`.
+- `fetch_diagnostics` (default `True`) — forwarded to `client.query_sensors(..., fetch_diagnostics=...)`.
+- `fetch_schedule` (default `True`) — gates whether `_poll()` calls `client.query_daily_schedule` at all.
+
+**Both fetch toggles only affect the Aquapura Split Green** (sn8 `17186T3A`): every other profile's
+status/sensors poll is already the minimum two commands regardless of these flags — flipping them off
+for a STANDARD/ATW/AQUAPURA/KJRH-120L device is a harmless no-op. For the Split Green specifically:
+- `fetch_diagnostics=False` skips the second (ODU/ambient) command inside
+  `_query_aquapura_split_green_sensors` — saves one cloud call per poll, costs the Outdoor Ambient
+  Temperature sensor (`t4_temp`). Despite the name, it does **not** affect the `entity_category=DIAGNOSTIC`
+  sensors on other profiles (condenser/evaporator/odu_voltage/…) — those are decoded from the
+  status/sensors calls already made every poll, so there's no extra call to skip for them.
+- `fetch_schedule=False` skips `client.query_daily_schedule` entirely (no network call) — saves one cloud
+  call per poll, costs the 20 `Daily Schedule *` entities (which read unavailable, not stale-cached).
+
+The options form's suggested (pre-filled) values are the entry's *current* saved options, via
+`self.add_suggested_values_to_schema(schema, {...})` — **not** a `vol.Optional(key, default=...)` static
+default, which would ignore what's already saved. `OptionsFlow.__init__` deliberately does **not** store
+`self.config_entry = config_entry` (deprecated, removed in HA 2025.12+); `self.config_entry` is read from
+the base class's property instead, inside `async_step_init` (see class docstring). Saving options triggers
+a full entry reload (`entry.add_update_listener` in `__init__.py`) so the coordinator picks up the new
+values — there's no live "hot" option update.
 
 ---
 
