@@ -95,16 +95,23 @@ class ILetComfortDisinfectionSwitch(
 ):
     """Switch entity for the Aquapura Split Green's "Desinfecção" (disinfection) mode.
 
-    Declared unconditionally like the other switches; every other profile
-    never populates ``coordinator.data["disinfection"]``, so this reads "off"
-    and its writes raise (see ``_async_set``) for them. Toggling it resends
-    the current hour/minute/temperature/cycle-days along with the new enable
-    bit — the device's write command always carries all five fields together
-    (see ``build_aquapura_split_green_disinfection_command``).
+    Named "Disinfection Routine" (not just "Disinfection") since a future
+    "Manual Disinfection" switch will trigger a one-off cycle on the same
+    device — this one is the scheduled routine (enable + hour/minute/
+    temperature/cycle-days), matching what the app's Desinfecção submenu
+    shows. Declared unconditionally like the other switches; every other
+    profile never populates ``coordinator.data["disinfection"]``, so this
+    reads "off" and its writes raise (see ``_async_set``) for them. The
+    hour/minute/temperature/cycle-days themselves are surfaced as separate
+    Diagnostic sensors (sensor.py's ``disinfection_*`` descriptions), not
+    duplicated here as attributes. Toggling this resends those current
+    values along with the new enable bit — the device's write command always
+    carries all five fields together (see
+    ``build_aquapura_split_green_disinfection_command``).
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Disinfection"
+    _attr_name = "Disinfection Routine"
     _attr_icon = "mdi:bacteria-outline"
 
     def __init__(self, coordinator: ILetComfortCoordinator) -> None:
@@ -122,18 +129,6 @@ class ILetComfortDisinfectionSwitch(
     def is_on(self) -> bool:
         settings = self._settings
         return bool(settings is not None and settings.enabled)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        settings = self._settings
-        if settings is None:
-            return {}
-        return {
-            "temperature": settings.temperature,
-            "hour": settings.hour,
-            "minute": settings.minute,
-            "cycle_days": settings.cycle_days,
-        }
 
     async def _async_set(self, enabled: bool) -> None:
         settings = self._settings

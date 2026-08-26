@@ -241,13 +241,18 @@ entry is padded with one extra `0x00` byte — **except the last field**, which 
         24 01 <enabled> 00  25 01 <hour> 00  26 01 <minute> 00  27 02 <temp hi> <temp lo> 00  28 01 <cycle> <cks>
 
 `build_aquapura_split_green_disinfection_command` reproduces this byte-exact. Because the write always
-carries every field, a caller changing only `enabled` (the **Disinfection** switch) must merge in the
+carries every field, a caller changing only `enabled` (the **Disinfection Routine** switch — named to
+leave room for a future one-off **Manual Disinfection** switch on the same device) must merge in the
 current hour/minute/temperature/cycle_days — it does NOT default them, since sending zeros would actually
 reset the device's real schedule. `api.py`'s `query_disinfection`/`set_disinfection` and
 `coordinator.async_set_disinfection` implement this; the switch reads current values from
-`coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. Fetched
-unconditionally every poll (same as the daily schedule, whose 02,58 frame it shares) — costs one extra
-command per poll, on top of the tank/ODU sensors' own two commands, an accepted cost for this profile.
+`coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. The
+hour/minute/temperature/cycle-days themselves are surfaced as separate `sensor.py` entities
+(`disinfection_temperature`, `disinfection_time` — "HH:MM" like the daily-schedule start/end times,
+`disinfection_cycle_days`), entity_category=DIAGNOSTIC like everything else here — not squeezed into the
+switch's attributes. Fetched unconditionally every poll (same as the daily schedule, whose 02,58 frame it
+shares) — costs one extra command per poll, on top of the tank/ODU sensors' own two commands, an accepted
+cost for this profile.
 
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real

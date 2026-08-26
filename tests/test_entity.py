@@ -25,7 +25,10 @@ from custom_components.iletcomfort.const import (
     REGION_US,
 )
 from custom_components.iletcomfort.coordinator import ILetComfortCoordinator
-from custom_components.iletcomfort.model_profiles import AquapuraSplitGreenScheduleSlot
+from custom_components.iletcomfort.model_profiles import (
+    AquapuraSplitGreenDisinfectionSettings,
+    AquapuraSplitGreenScheduleSlot,
+)
 from custom_components.iletcomfort import select as select_platform
 from custom_components.iletcomfort.select import ILetComfortMuteSelect
 from custom_components.iletcomfort.sensor import (
@@ -192,6 +195,34 @@ def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):
     assert _value("daily_schedule_4_start_time") is None
 
 
+def test_disinfection_sensors_read_settings(hass: HomeAssistant):
+    """Disinfection Temperature/Time/Cycle read coordinator.data["disinfection"]."""
+    coord = _coordinator(hass)
+    coord.data["disinfection"] = AquapuraSplitGreenDisinfectionSettings(
+        enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
+    )
+
+    def _value(key: str):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        return ILetComfortSensor(coord, desc).native_value
+
+    assert _value("disinfection_temperature") == 65.0
+    assert _value("disinfection_time") == "14:00"
+    assert _value("disinfection_cycle_days") == 7
+
+
+def test_disinfection_sensors_none_without_disinfection_data(hass: HomeAssistant):
+    """No disinfection key (STANDARD/other profiles) → every field reads None."""
+    coord = _coordinator(hass)
+    assert "disinfection" not in coord.data
+
+    for key in (
+        "disinfection_temperature", "disinfection_time", "disinfection_cycle_days",
+    ):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        assert ILetComfortSensor(coord, desc).native_value is None
+
+
 def test_daily_schedule_sensors_none_without_schedule_data(hass: HomeAssistant):
     """No schedule key (STANDARD/other profiles) → every field reads None."""
     coord = _coordinator(hass)
@@ -339,7 +370,9 @@ async def test_full_integration_setup_adds_every_entity_without_error(
                 start_time="09:00", end_time="21:00",
             ),
         ]
-        client.query_disinfection.return_value = None
+        client.query_disinfection.return_value = AquapuraSplitGreenDisinfectionSettings(
+            enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
+        )
 
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -351,3 +384,5 @@ async def test_full_integration_setup_adds_every_entity_without_error(
     entity_ids = hass.states.async_entity_ids()
     assert any("daily_schedule_1_setpoint" in e for e in entity_ids)
     assert any("daily_schedule_1_active" in e for e in entity_ids)
+    assert any("disinfection_temperature" in e for e in entity_ids)
+    assert any(e.startswith("switch.") and "disinfection" in e for e in entity_ids)

@@ -68,6 +68,27 @@ def _st(attr: str) -> Callable[[dict[str, Any]], Any]:
     return _get
 
 
+def _disinfection(attr: str) -> Callable[[dict[str, Any]], Any]:
+    """Helper: get an attribute from the Aquapura Split Green disinfection
+    ("Desinfecção") settings. None if there's no disinfection data for this
+    device/poll (every other profile).
+    """
+    def _get(data: dict[str, Any]) -> Any:
+        settings = data.get("disinfection")
+        return getattr(settings, attr, None) if settings else None
+    return _get
+
+
+def _disinfection_time(data: dict[str, Any]) -> Any:
+    """Disinfection hour:minute as "HH:MM", matching the daily-schedule
+    start/end time sensors' format.
+    """
+    settings = data.get("disinfection")
+    if settings is None:
+        return None
+    return f"{settings.hour:02d}:{settings.minute:02d}"
+
+
 SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
     ILetComfortSensorDescription(
         key="water_inlet",
@@ -257,6 +278,33 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
                 value_fn=_schedule_slot(n - 1, "mode"),
             ),
         )
+    ),
+    # Aquapura Split Green "Desinfecção" routine settings — the Disinfection
+    # Routine switch (switch.py) only carries the enable bit; these surface
+    # the temperature/time/cycle it reuses on every write (see
+    # build_aquapura_split_green_disinfection_command).
+    ILetComfortSensorDescription(
+        key="disinfection_temperature",
+        name="Disinfection Temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_disinfection("temperature"),
+    ),
+    ILetComfortSensorDescription(
+        key="disinfection_time",
+        name="Disinfection Time",
+        icon="mdi:clock-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_disinfection_time,
+    ),
+    ILetComfortSensorDescription(
+        key="disinfection_cycle_days",
+        name="Disinfection Cycle",
+        icon="mdi:calendar-refresh",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_disinfection("cycle_days"),
     ),
 )
 
