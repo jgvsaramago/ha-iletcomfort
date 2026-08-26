@@ -176,7 +176,11 @@ the Off button usable).
 **STATUS body[14]** (raw idx24) as the marker (`0x40`="Eco", `0x80`="Disparo") — the **same** marker byte
 and vocabulary as a daily-schedule slot's mode byte (§ above), and again the *only* byte that changes
 between the two responses. Surfaced on `ITSStatus.operating_mode` (a field only this profile populates)
-and a new select entity, "DHW Mode" (`ILetComfortAquapuraSplitGreenModeSelect` in `select.py`).
+and, in `climate.py`, as the climate entity's **preset_mode** (`AQUAPURA_SPLIT_GREEN_PRESET_MODES =
+["Eco", "Disparo"]`) — deliberately part of the climate card (alongside the existing Off/Heat
+`hvac_mode`), not a separate select entity, so it reads as one set of "modes" on one card. Declared
+unconditionally on the single shared `ILetComfortClimate` class, like `hvac_modes`; other profiles never
+populate `operating_mode`, so `preset_mode` just reads `None` (no preset) for them.
 
 **Writes — all confirmed.** Every captured write (power, operating mode, setpoint) shares ONE frame shape,
 differing only in field id / value length / value:

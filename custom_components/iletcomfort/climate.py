@@ -51,6 +51,14 @@ _HVAC_TO_SET_MODE: dict[HVACMode, int] = {
     HVACMode.FAN_ONLY: MODE_WATERPUMP,
 }
 
+# Aquapura Split Green only: the "Eco"/"Disparo" operating preset, surfaced as
+# a climate preset (alongside the Off/Heat hvac_mode already on the same
+# card) rather than a separate select entity. Declared unconditionally like
+# hvac_modes/supported_features (this is one entity class serving every
+# profile); other profiles never populate status.operating_mode, so
+# preset_mode just reads None for them (see PRESET_MODES constant below).
+AQUAPURA_SPLIT_GREEN_PRESET_MODES = ["Eco", "Disparo"]
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -73,8 +81,10 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
+        | ClimateEntityFeature.PRESET_MODE
     )
     _attr_target_temperature_step = 1.0
+    _attr_preset_modes = AQUAPURA_SPLIT_GREEN_PRESET_MODES
 
     def __init__(self, coordinator: ILetComfortCoordinator) -> None:
         super().__init__(coordinator)
@@ -131,6 +141,21 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
             if self._sensors.t4_temp is not None:
                 attrs["outdoor_ambient"] = self._sensors.t4_temp
         return attrs
+
+    @property
+    def preset_mode(self) -> str | None:
+        # Only the Aquapura Split Green populates operating_mode; every other
+        # profile's status leaves it None, so this reads "no preset" for them.
+        # An unrecognised marker (reported as "Unknown(0xNN)") also reads as
+        # None rather than being forced into one of the two known presets.
+        if self._status is None:
+            return None
+        if self._status.operating_mode not in AQUAPURA_SPLIT_GREEN_PRESET_MODES:
+            return None
+        return self._status.operating_mode
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        await self.coordinator.async_set_device(operating_mode=preset_mode)
 
     @property
     def target_temperature(self) -> float | None:

@@ -193,3 +193,54 @@ def test_kjrh120l_hvac_mode_heat_from_on_frame():
     entity = _climate(KJRH120L_SN8, ITSSensors(), status)
     assert entity.hvac_mode != HVACMode.OFF
     assert entity.hvac_mode == HVACMode.HEAT
+
+
+# --- Aquapura Split Green "Eco"/"Disparo" preset (part of the climate card,
+# not a separate select entity — alongside the existing Off/Heat hvac_mode). --
+
+
+def test_aquapura_split_green_preset_modes_are_eco_and_disparo():
+    entity = _climate(AQUAPURA_SPLIT_GREEN_SN8, ITSSensors())
+    assert entity.preset_modes == ["Eco", "Disparo"]
+
+
+def test_aquapura_split_green_preset_mode_reads_confirmed_status_value():
+    entity = _climate(
+        AQUAPURA_SPLIT_GREEN_SN8, ITSSensors(), ITSStatus(operating_mode="Disparo"),
+    )
+    assert entity.preset_mode == "Disparo"
+
+    entity = _climate(
+        AQUAPURA_SPLIT_GREEN_SN8, ITSSensors(), ITSStatus(operating_mode="Eco"),
+    )
+    assert entity.preset_mode == "Eco"
+
+
+def test_preset_mode_none_when_no_status():
+    entity = _climate(AQUAPURA_SPLIT_GREEN_SN8, ITSSensors(), None)
+    assert entity.preset_mode is None
+
+
+def test_preset_mode_none_for_unconfirmed_marker_or_other_profile():
+    """An "Unknown(0xNN)" marker, or another profile that never populates
+    operating_mode, both read as no-preset rather than a forced guess.
+    """
+    entity = _climate(
+        AQUAPURA_SPLIT_GREEN_SN8,
+        ITSSensors(),
+        ITSStatus(operating_mode="Unknown(0x20)"),
+    )
+    assert entity.preset_mode is None
+
+    entity = _climate(ATW_SN8, ITSSensors(), ITSStatus(mode=1))
+    assert entity.preset_mode is None
+
+
+async def test_async_set_preset_mode_forwards_operating_mode():
+    entity = _climate(
+        AQUAPURA_SPLIT_GREEN_SN8, ITSSensors(), ITSStatus(operating_mode="Eco"),
+    )
+    await entity.async_set_preset_mode("Disparo")
+    entity.coordinator.async_set_device.assert_awaited_once_with(
+        operating_mode="Disparo",
+    )
