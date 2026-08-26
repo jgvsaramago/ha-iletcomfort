@@ -27,6 +27,8 @@ from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
 from .model_profiles import (
+    AQUAPURA_SPLIT_GREEN_TEMP_MAX,
+    AQUAPURA_SPLIT_GREEN_TEMP_MIN,
     KJRH120L_TEMP_MAX,
     KJRH120L_TEMP_MIN,
     ModelProfile,
@@ -144,10 +146,14 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
 
     @property
     def min_temp(self) -> float:
-        # KJRH-120L is a DHW heat-pump water heater; its setpoint range sits
-        # above the air-side HEAT range (issue #35).
+        # KJRH-120L and Aquapura Split Green are DHW heat-pump water heaters;
+        # their setpoint range sits above the air-side HEAT range (issue #35).
+        # No app-confirmed limit is captured for the Split Green yet, so it
+        # reuses the KJRH-120L's validated DHW range as a conservative bound.
         if self._profile is ModelProfile.KJRH120L:
             return float(KJRH120L_TEMP_MIN)
+        if self._profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return float(AQUAPURA_SPLIT_GREEN_TEMP_MIN)
         set_mode = _HVAC_TO_SET_MODE.get(self.hvac_mode)
         if set_mode is not None and set_mode in TEMP_RANGES:
             return float(TEMP_RANGES[set_mode][0])
@@ -157,6 +163,8 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
     def max_temp(self) -> float:
         if self._profile is ModelProfile.KJRH120L:
             return float(KJRH120L_TEMP_MAX)
+        if self._profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return float(AQUAPURA_SPLIT_GREEN_TEMP_MAX)
         set_mode = _HVAC_TO_SET_MODE.get(self.hvac_mode)
         if set_mode is not None and set_mode in TEMP_RANGES:
             return float(TEMP_RANGES[set_mode][1])

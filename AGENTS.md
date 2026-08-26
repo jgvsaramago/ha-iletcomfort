@@ -123,8 +123,7 @@ no network call). Other selectors captured but unused: `00,00` identity, `00,64`
 timers/errors, `02,62` a *second*, differently-laid-out schedule frame, `03,e8` ODU sensors.
 
 Confirmed against **two** captures — A (tank 49 °C, ambient 21 °C) and B (tank 48 °C, ambient 20 °C),
-both unit OFF, setpoint 50 °C:
-- STATUS body[27] = DHW setpoint, **direct °C** → `t5s_def` / `set_temperature`.
+both unit OFF:
 - TANK body[30:32] = tank temp, **16-bit BE tenths** (A `0x01ec` → 49.2, B `0x01e7` → 48.7) → `th_temp`.
   The value moved with the real tank, so this frame is **live, not cached**.
 - ODU body[49:51] = outdoor ambient, same encoding (A `0x00d4` → 21.2, B `0x00d0` → 20.8) → `t4_temp`.
@@ -135,6 +134,17 @@ both unit OFF, setpoint 50 °C:
   **constant, NOT ambient 21 °C** — an early coincidence, ruled out by frame comparison.
 - Live temps use `0x7fff` for "sensor absent"; `_aquapura_split_green_temp16` also rejects implausible
   values so a padded/stub frame reports nothing rather than 6553.5 °C.
+
+**STATUS setpoint — WRONG TURN, then corrected.** The very first capture (unit OFF, app-shown 50 °C) had
+body[27] == `0x32` (=50, direct °C), and that single coincidental match was reported as "the DHW
+setpoint". A capture series that actually **changed** the setpoint (50→51→52→50 via the app, mitmproxy
+request+response each time) proved that wrong: body[27] **never moved** — it stayed `0x32` in every
+capture regardless of the real setpoint. The byte that tracks the live setpoint exactly is **body[15:17]**,
+16-bit BE **tenths** (`0x01fe`→51.0, `0x0208`→52.0, `0x01f4`→50.0 — all three match the app request to the
+decimal). body[27] is left undecoded (constant across every capture so far; true meaning unconfirmed —
+maybe a limit, maybe stale). **Lesson (see §2/meta-lesson above): one coincidental byte match from a
+single capture is not confirmation** — it takes a capture that actually changes the value to tell a real
+field from a constant that happens to match.
 
 **Two commands per sensors poll.** The tank and the ambient live in different frames, so
 `_query_aquapura_split_green_sensors` fetches `03,84` then `03,e8` and merges them. The ODU fetch is
@@ -156,32 +166,43 @@ device (matches the KJRH-120L-suppressed-temps precedent): value_fns index into 
 return `None`/`False` when the slot/list is absent, so non-Split-Green devices just show them
 unknown/off rather than needing profile-conditional entity registration.
 
-**Power/mode — confirmed.** A real ON/OFF mitmproxy capture pair (SET request + STATUS response, both
-states) pins **STATUS body[13]** (raw idx23) as the power bit (`0x00`=Off, `0x01`=On); diffing the two
-response frames shows it's the **only** byte that changes. The four originally-suspected candidates
-(body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) are constant across Off/On and were a
-mis-index from a single-capture guess. `mode` is reported 0/"Off" or 1/"Heat" (same convention as
-KJRH-120L: query mode 1 → `HVACMode.HEAT` in climate.py, a non-off state, making the card read ON and the
-Off button usable).
+**Power — confirmed.** A real ON/OFF mitmproxy capture pair (SET request + STATUS response, both states)
+pins **STATUS body[13]** (raw idx23) as the power bit (`0x00`=Off, `0x01`=On); diffing the two response
+frames shows it's the **only** byte that changes. `mode` is reported 0/"Off" or 1/"Heat" (same convention
+as KJRH-120L: query mode 1 → `HVACMode.HEAT` in climate.py, a non-off state, making the card read ON and
+the Off button usable).
 
-**Power writes — confirmed.** The captured SET frame (both states, byte-identical apart from the power
-byte and checksum):
+**Operating mode ("Eco"/"Disparo") — confirmed.** A real mode-toggle mitmproxy capture pair pins
+**STATUS body[14]** (raw idx24) as the marker (`0x40`="Eco", `0x80`="Disparo") — the **same** marker byte
+and vocabulary as a daily-schedule slot's mode byte (§ above), and again the *only* byte that changes
+between the two responses. Surfaced on `ITSStatus.operating_mode` (a field only this profile populates)
+and a new select entity, "DHW Mode" (`ILetComfortAquapuraSplitGreenModeSelect` in `select.py`).
 
-    aa 18 c3 00 00 00 00 00 00 02 00 01 f4 ff ff ff ff 01 ff ff 00 0b 01 <pwr> <cks>
+**Writes — all confirmed.** Every captured write (power, operating mode, setpoint) shares ONE frame shape,
+differing only in field id / value length / value:
 
-`<pwr>` = `0x01`/`0x00`; same checksum formula as the query frames. `build_aquapura_split_green_power_command`
-reproduces both captures byte-exact. Note header[9] = `0x02` here (a SET/control request) vs `0x03` for a
-plain query — this also explains an earlier oddity: a schedule-frame capture taken right after an app
-write also had raw[9]=`0x02`, most likely echoing "this exchange involved a write", not a data field.
-`api.py`'s `_set_device_aquapura_split_green` wires this in: `power_on=True` or any non-off `mode` → ON
-command, `mode=MODE_OFF` → OFF command (mirrors `_set_device_kjrh120l`'s priority logic).
+    aa <len> c3 00×6 02 00 01 f4 ff ff ff ff 01 ff ff 00 <fld> <vlen> <value...> <cks>
+
+    fld 0x0b, vlen 1: power        (0x01 On / 0x00 Off)
+    fld 0x0c, vlen 1: op. mode     (0x40 Eco / 0x80 Disparo)
+    fld 0x0d, vlen 2: DHW setpoint (16-bit BE tenths °C, e.g. 0x01fe = 51.0)
+
+Confirmed byte-exact against 7 real captures (2 power, 2 mode, 3 setpoint: 50→51→52→50) via
+`_build_aquapura_split_green_write`. Same checksum formula as the query frames. header[9] = `0x02` here (a
+SET/control request) vs `0x03` for a plain query — this also explains an earlier oddity: a schedule-frame
+capture taken right after an app write also had raw[9]=`0x02`, most likely echoing "this exchange involved
+a write", not a data field. `api.py`'s `_set_device_aquapura_split_green` wires all three in, with priority
+`operating_mode` > `temperature` > power on/off (the app only ever writes one field per action, so this
+priority is defensive rather than load-bearing — mirrors `_set_device_kjrh120l`'s equivalent rule).
 
 **Still not decoded / not writable:**
-1. **Setpoint writes**: no SET command for the DHW setpoint has been captured (only power on/off).
-   `set_device` still **raises a clear ApiError** for a temperature change on this profile, rather than
-   building the legacy 62-byte frame from a status query the device doesn't answer.
+1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real
+   setpoint moved), no confirmed meaning.
 2. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
    to validate against — left unmapped rather than guessed.
+3. Setpoint/power/mode **limits**: no app-confirmed min/max capture exists, so the climate entity reuses
+   the KJRH-120L's validated DHW range (`AQUAPURA_SPLIT_GREEN_TEMP_MIN/MAX` = 20-70 °C) as a conservative
+   bound — wide enough for the captured 50-52 °C values without guessing a tighter one.
 
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).

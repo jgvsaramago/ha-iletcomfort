@@ -44,8 +44,10 @@ from custom_components.iletcomfort.model_profiles import (
     ModelProfile,
     apply_profile_to_sensors,
     apply_profile_to_status,
+    build_aquapura_split_green_operating_mode_command,
     build_aquapura_split_green_power_command,
     build_aquapura_split_green_query,
+    build_aquapura_split_green_setpoint_command,
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_aquapura_split_green_ambient_temp,
@@ -542,6 +544,178 @@ AQUAPURA_SPLIT_GREEN_STATUS_OFF_RAW = _bytes(
 AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY = AQUAPURA_SPLIT_GREEN_STATUS_ON_RAW[10:-1]
 AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY = AQUAPURA_SPLIT_GREEN_STATUS_OFF_RAW[10:-1]
 
+# Real setpoint-change SET request + response triples, captured changing the
+# DHW setpoint 50 -> 51 -> 52 -> 50 °C in the app (mitmproxy). Diffing the
+# responses shows body[15:17] (16-bit BE tenths) is the ONLY thing that moves.
+AQUAPURA_SPLIT_GREEN_SETPOINT_51_COMMAND = (
+    "aa19c3000000000000020001f4ffffffff01ffff000d0201fe24"
+)
+AQUAPURA_SPLIT_GREEN_SETPOINT_52_COMMAND = (
+    "aa19c3000000000000020001f4ffffffff01ffff000d02020819"
+)
+AQUAPURA_SPLIT_GREEN_SETPOINT_50_COMMAND = (
+    "aa19c3000000000000020001f4ffffffff01ffff000d0201f42e"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,01,fe,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,20"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_50_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,01,f4,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,2a"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_50_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_50_RAW[10:-1]
+)
+
+# Real operating-mode-change SET request + response pair, captured switching
+# Eco <-> Disparo in the app (mitmproxy). Diffing the responses shows body[14]
+# is the ONLY thing that moves — same marker encoding as a schedule slot.
+AQUAPURA_SPLIT_GREEN_MODE_DISPARO_COMMAND = (
+    "aa18c3000000000000020001f4ffffffff01ffff000c0180a6"
+)
+AQUAPURA_SPLIT_GREEN_MODE_ECO_COMMAND = (
+    "aa18c3000000000000020001f4ffffffff01ffff000c0140e6"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,80,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,d5"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_BODY = (
+    AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_RAW[10:-1]
+)
+
+
+def test_aquapura_split_green_status_setpoint_from_real_capture_series():
+    """body[15:17] tracks 3 real setpoint changes (50->51->52->50) exactly.
+
+    Each response's only diff from its predecessor is body[15:17] — proof this
+    field (not body[27], which stays 0x32 throughout) is the live setpoint.
+    """
+    s51 = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_BODY,
+    )
+    s52 = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_BODY,
+    )
+    s50 = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_50_BODY,
+    )
+
+    assert s51.t5s_def == 51.0
+    assert s51.set_temperature == 51
+    assert s52.t5s_def == 52.0
+    assert s52.set_temperature == 52
+    assert s50.t5s_def == 50.0
+    assert s50.set_temperature == 50
+
+    # body[27] is constant 0x32 (=50) across ALL three, regardless of the real
+    # setpoint — confirms it is NOT the field that changed.
+    assert AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_BODY[27] == 0x32
+    assert AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_BODY[27] == 0x32
+    assert AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_50_BODY[27] == 0x32
+
+    diffs_51_52 = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_BODY))
+        if AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_52_BODY[i]
+    ]
+    assert diffs_51_52 == [15, 16]
+
+
+def test_aquapura_split_green_status_operating_mode_from_real_capture_pair():
+    """body[14] is confirmed as the operating-mode marker by a real toggle pair.
+
+    Diffing the two responses (captured switching Eco <-> Disparo in the app)
+    shows it is the ONLY byte that changes.
+    """
+    disparo = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_BODY,
+    )
+    eco = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_BODY,
+    )
+
+    assert AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_BODY[14] == 0x80
+    assert AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_BODY[14] == 0x40
+    assert disparo.operating_mode == "Disparo"
+    assert eco.operating_mode == "Eco"
+
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_BODY))
+        if AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_BODY[i]
+    ]
+    assert diffs == [14]
+    assert disparo.t5s_def == eco.t5s_def
+    assert disparo.mode == eco.mode  # power unaffected by operating mode
+
+
+def test_aquapura_split_green_status_operating_mode_defaults_to_eco():
+    """The very first (pre-toggle) capture already reads Eco (marker 0x40)."""
+    status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    assert AQUAPURA_SPLIT_GREEN_STATUS_BODY[14] == 0x40
+    assert status.operating_mode == "Eco"
+
+
+def test_aquapura_split_green_status_operating_mode_unknown_marker():
+    """An unrecognised marker reports Unknown(0xNN) rather than guessing."""
+    body = bytearray(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
+    body[14] = 0x20
+    status = decode_aquapura_split_green_status(bytes(body))
+    assert status.operating_mode == "Unknown(0x20)"
+
+
+def test_build_aquapura_split_green_setpoint_command_matches_captured_commands():
+    """All 3 captured setpoint writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_setpoint_command(51)
+        == AQUAPURA_SPLIT_GREEN_SETPOINT_51_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_setpoint_command(52)
+        == AQUAPURA_SPLIT_GREEN_SETPOINT_52_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_setpoint_command(50)
+        == AQUAPURA_SPLIT_GREEN_SETPOINT_50_COMMAND
+    )
+
+
+def test_build_aquapura_split_green_operating_mode_command_matches_captured_commands():
+    """Both captured mode writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_operating_mode_command("Disparo")
+        == AQUAPURA_SPLIT_GREEN_MODE_DISPARO_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_operating_mode_command("Eco")
+        == AQUAPURA_SPLIT_GREEN_MODE_ECO_COMMAND
+    )
+
+
+def test_build_aquapura_split_green_operating_mode_command_rejects_unknown():
+    """An unproven mode label must not silently send a guessed marker byte."""
+    with pytest.raises(ValueError, match="Unknown Aquapura Split Green operating mode"):
+        build_aquapura_split_green_operating_mode_command("Boost")
+
 # Real TANK (selector 0x03,0x84) response frame from capture B, complete as
 # captured: raw idx40:41 = 0x01e7 = 48.7 °C, app showed 48.
 AQUAPURA_SPLIT_GREEN_TANK_RAW = _bytes(
@@ -614,21 +788,27 @@ def test_build_query_command_aquapura_split_green_uses_app_selector_frames():
 
 
 def test_aquapura_split_green_status_decodes_confirmed_setpoint():
-    """body[27] is the DHW setpoint, direct °C (0x32 = 50, as the app showed)."""
+    """body[15:17] is the live DHW setpoint, 16-bit BE tenths of °C (0x0208 = 52.0).
+
+    NOT body[27] (0x32 = 50): that byte is constant across every capture in
+    this fixture set, including ones where the real setpoint moved — see the
+    module notes' "wrong turn" writeup. body[15:17], by contrast, is proven by
+    the 50->51->52->50 capture series to track the live value exactly.
+    """
     status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
 
-    assert AQUAPURA_SPLIT_GREEN_STATUS_BODY[27] == 0x32
+    assert AQUAPURA_SPLIT_GREEN_STATUS_BODY[27] == 0x32  # constant, NOT the setpoint
     # Surfaced via t5s_def so the climate target_temperature reads it.
-    assert status.t5s_def == 50.0
-    assert status.set_temperature == 50
+    assert status.t5s_def == 52.0
+    assert status.set_temperature == 52
     assert status.error_code == 0
     assert status.raw_body == bytes(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
 
 
-def test_aquapura_split_green_status_setpoint_tracks_body27():
-    """The setpoint follows body[27] rather than being pinned to one capture."""
+def test_aquapura_split_green_status_setpoint_tracks_body15_17():
+    """The setpoint follows body[15:17] rather than being pinned to one capture."""
     body = bytearray(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
-    body[27] = 0x37
+    body[15:17] = (550).to_bytes(2, "big")
     status = decode_aquapura_split_green_status(bytes(body))
     assert status.t5s_def == 55.0
     assert status.set_temperature == 55
@@ -646,9 +826,11 @@ def test_aquapura_split_green_status_power_on_off_from_real_capture_pair():
     """body[13] (raw idx23) is confirmed as the power bit by a real ON/OFF pair.
 
     Diffing the two response frames (captured toggling power in the app) shows
-    it is the ONLY byte that changes — the four earlier "candidate" bytes
-    (body[14]=0x40, body[15]=0x02, body[16]=0x08, body[20]=0x01) are identical
-    in both and are NOT the power bit.
+    it is the ONLY byte that changes — the four originally-suspected candidate
+    bytes (body[14], body[15], body[16], body[20]) are identical in both and
+    are NOT the power bit. (body[14] turned out to be the operating-mode
+    marker and body[15:17] the live setpoint — both confirmed by separate
+    capture pairs below — while power is isolated to body[13] alone here.)
     """
     on_status = decode_aquapura_split_green_status(
         AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY,
@@ -672,7 +854,7 @@ def test_aquapura_split_green_status_power_on_off_from_real_capture_pair():
         != AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY[i]
     ]
     assert diffs == [13]
-    assert on_status.t5s_def == off_status.t5s_def == 50.0
+    assert on_status.t5s_def == off_status.t5s_def
 
 
 def test_aquapura_split_green_status_power_byte_is_body13():
@@ -713,8 +895,8 @@ def test_aquapura_split_green_profile_applied_to_status_object():
     split_green = apply_profile_to_status(ModelProfile.AQUAPURA_SPLIT_GREEN, std)
     assert split_green.mode == 0
     assert split_green.mode_name == "Off"
-    assert split_green.t5s_def == 50.0
-    assert split_green.set_temperature == 50
+    assert split_green.t5s_def == 52.0
+    assert split_green.set_temperature == 52
     assert split_green.error_code == 0
 
 
@@ -841,8 +1023,8 @@ def test_query_status_aquapura_split_green_sends_selector_frame_and_decodes():
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0xF4)],
     )
-    assert status.t5s_def == 50.0
-    assert status.set_temperature == 50
+    assert status.t5s_def == 52.0
+    assert status.set_temperature == 52
     assert status.error_code == 0
 
 
@@ -1029,20 +1211,52 @@ def test_query_daily_schedule_other_profiles_send_no_command():
     send.assert_not_called()
 
 
-def test_aquapura_split_green_set_device_temperature_refuses_instead_of_sending_garbage():
-    """Setpoint writes are refused: no setpoint SET frame has been captured yet.
+def test_aquapura_split_green_set_device_sends_captured_setpoint_command():
+    """set_device sends the real captured setpoint-write command, not a guess.
 
-    The legacy SET path builds its frame from a status query this model does not
-    answer, so it would send a frame assembled from garbage. Fail loudly instead.
-    Power on/off IS captured and must not be blocked by this same guard — see
-    test_aquapura_split_green_set_device_sends_captured_power_command below.
+    climate.async_set_temperature calls async_set_device(temperature=...), so
+    this mirrors that call shape.
     """
     client = _make_client()
-    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_RAW.hex()) as send:
-        with pytest.raises(ApiError, match="not supported yet"):
-            client.set_device("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, temperature=50)
 
-    send.assert_not_called()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_SETPOINT_51_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, temperature=51,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_SETPOINT_51_COMMAND,
+    )
+    assert result["effective_temp"] == 51
+
+
+def test_aquapura_split_green_set_device_sends_captured_operating_mode_command():
+    """set_device sends the real captured Eco/Disparo write command.
+
+    A future select entity calls async_set_device(operating_mode=...); this
+    mirrors that call shape and confirms it takes priority over a same-call
+    temperature/power request (mirroring _set_device_kjrh120l's priority
+    rule), since the app only ever writes one field per action.
+    """
+    client = _make_client()
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_MODE_DISPARO_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, operating_mode="Disparo",
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_MODE_DISPARO_COMMAND,
+    )
+    assert result["effective_operating_mode"] == "Disparo"
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_MODE_ECO_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+            operating_mode="Eco", temperature=51, power_on=True,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_MODE_ECO_COMMAND,
+    )
+    assert result["effective_operating_mode"] == "Eco"
 
 
 def test_aquapura_split_green_set_device_sends_captured_power_command():

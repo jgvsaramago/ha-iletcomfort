@@ -252,6 +252,10 @@ class ITSStatus:
     pump_system: bool = False
     mode: int = 0
     mode_name: str = "Off"
+    # Aquapura Split Green only: the "Eco"/"Disparo" operating preset (distinct
+    # from ``mode``, which is power Off/Heat for this profile). None for every
+    # other profile.
+    operating_mode: str | None = None
     t5s_def: float | None = None
     t5s_max: float | None = None
     set_temperature: int = 0
@@ -869,20 +873,21 @@ class ILetComfortClient:
         mute_level: int | None = None,
         power_on: bool = False,
         last_on_state: tuple[int, int] | None = None,
+        operating_mode: str | None = None,
     ) -> dict[str, Any]:
         """Send a SET command to the heat pump.
 
         ``sn8`` selects the write encoding per model. The KJRH-120L (sn8
         17100003) rejects the standard 62-byte C3 SET frame, so for that profile
         a captured short write command (``00 <field> 01 <value> ff``) is sent
-        directly. The Aquapura Split Green (sn8 17186T3A) has a captured power
-        ON/OFF write but no captured setpoint write yet, so only power control
-        works for it — a temperature change still raises rather than sending a
-        frame assembled from garbage (the legacy path below builds its frame
-        from a status query this model does not answer). Every other
-        (unknown/None/ATW/AQUAPURA) sn8 keeps the legacy build_c3_set path
-        unchanged: query current status for echo bytes, merge the requested
-        changes, validate temperature ranges, build and send the SET frame.
+        directly. The Aquapura Split Green (sn8 17186T3A) has captured power,
+        DHW-setpoint, and operating-mode ("Eco"/"Disparo", ``operating_mode``)
+        writes, each sent as its own single-field command — see
+        ``_set_device_aquapura_split_green``. Every other (unknown/None/ATW/
+        AQUAPURA) sn8 keeps the legacy build_c3_set path unchanged: query
+        current status for echo bytes, merge the requested changes, validate
+        temperature ranges, build and send the SET frame. ``operating_mode`` is
+        ignored by every profile except the Aquapura Split Green.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
         from .model_profiles import ModelProfile, resolve_profile
@@ -901,6 +906,7 @@ class ILetComfortClient:
                 mode=mode,
                 temperature=temperature,
                 power_on=power_on,
+                operating_mode=operating_mode,
             )
 
         # Query current status for echo bytes
@@ -1021,31 +1027,37 @@ class ILetComfortClient:
         mode: int | None,
         temperature: int | None,
         power_on: bool,
+        operating_mode: str | None,
     ) -> dict[str, Any]:
-        """Send an Aquapura Split Green (sn8 17186T3A) power ON/OFF command.
+        """Send an Aquapura Split Green (sn8 17186T3A) write command.
 
-        Only power control is captured for this model (a real ON/OFF request +
-        response pair, see model_profiles). A temperature change is refused
-        rather than guessed: no DHW-setpoint SET frame has been captured yet,
-        and the legacy 62-byte C3 SET frame is built from a status query this
-        device does not answer.
+        Every captured write for this model (power, DHW setpoint, "Eco"/
+        "Disparo" operating mode) is a single-field command — the app sends
+        one per user action, never combined — so this sends exactly one:
+        ``operating_mode`` takes priority (it's an independent axis from
+        power/temperature), then ``temperature``, then power on/off. This
+        mirrors ``_set_device_kjrh120l``'s "temperature takes priority over a
+        same-call mode change" rule.
         """
         # Imported lazily to avoid a circular import (model_profiles imports api).
-        from .model_profiles import build_aquapura_split_green_power_command
+        from .model_profiles import (
+            build_aquapura_split_green_operating_mode_command,
+            build_aquapura_split_green_power_command,
+            build_aquapura_split_green_setpoint_command,
+        )
 
-        if temperature is not None:
-            raise ApiError(
-                "Changing the DHW setpoint is not supported yet for the "
-                "Aquapura Split Green (sn8 17186T3A): no setpoint write "
-                "command has been captured from the official app. Turning "
-                "the unit on/off works."
+        if operating_mode is not None:
+            command = build_aquapura_split_green_operating_mode_command(
+                operating_mode,
             )
+            effective: dict[str, Any] = {"effective_operating_mode": operating_mode}
+        elif temperature is not None:
+            command = build_aquapura_split_green_setpoint_command(temperature)
+            effective = {"effective_temp": temperature}
+        else:
+            power = power_on or (mode is not None and mode != MODE_OFF)
+            command = build_aquapura_split_green_power_command(power)
+            effective = {"effective_power": power}
 
-        power = power_on or (mode is not None and mode != MODE_OFF)
-        command = build_aquapura_split_green_power_command(power)
         response_hex = self.send_hex_command(appliance_code, command)
-        return {
-            "sent": command,
-            "response": response_hex,
-            "effective_power": power,
-        }
+        return {"sent": command, "response": response_hex, **effective}

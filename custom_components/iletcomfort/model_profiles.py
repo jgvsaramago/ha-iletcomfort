@@ -355,7 +355,6 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 # CONFIRMED against the app across TWO captures — capture A (tank 49 °C,
 # ambient 21 °C) and capture B (tank 48 °C, ambient 20 °C), both with the unit
 # OFF and the setpoint at 50 °C:
-#   STATUS frame (0x01,0xf4): body[27] = DHW setpoint, direct °C (0x32 → 50).
 #   TANK frame  (0x03,0x84):  body[30:32] = tank temp ×10 BE
 #                             (A 0x01ec → 49.2, B 0x01e7 → 48.7). The value
 #                             moved with the real tank, so this frame is LIVE,
@@ -374,37 +373,63 @@ def build_kjrh120l_set_temperature(temp: int) -> str:
 # sensors, where the ODU fetch is best-effort so a failure costs the ambient but
 # never the tank temperature.
 #
-# POWER/MODE — confirmed via a captured ON and OFF mitmproxy pair (request +
-# response for each), turning the unit on/off in the app:
-#   STATUS body[13] (raw idx23) = power: 0x00 = Off, 0x01 = On. Diffing the two
-#   response frames showed this is the ONLY body byte that changes — the four
-#   earlier "candidate" bytes (body[14]=0x40, body[15]=0x02, body[16]=0x08,
-#   body[20]=0x01) are constant across Off/On and are NOT the power bit; that
-#   was a mis-index in the original single-capture guess.
-#   mode is reported 0/"Off" or 1/"Heat" (KJRH-120L's same convention: query
-#   mode 1 maps to HVACMode.HEAT in climate.py, a non-off state, so the card
-#   reads ON and the Off button becomes usable).
+# STATUS frame (0x01,f4) — WRONG TURN, then corrected. The very first capture
+# (unit OFF, app setpoint 50 °C) had body[27] == 0x32 (=50, direct °C), and
+# that single coincidental match was reported as "the DHW setpoint". A later
+# capture series that actually CHANGED the setpoint (50→51→52→50 via the app,
+# mitmproxy request+response each time) proved that was wrong: body[27] never
+# moved — it stayed 0x32 in every single capture regardless of the real
+# setpoint. The byte that tracks the live setpoint exactly is body[15:17], a
+# 16-bit BE TENTHS value (0x01fe→51.0, 0x0208→52.0, 0x01f4→50.0 — all three
+# match the requested value to the decimal). body[27] is left undecoded; its
+# true meaning (a limit? a stale/cached field?) is unconfirmed.
+# Lesson (see AGENTS.md §2c/meta-lesson): one coincidental byte match from a
+# single capture is not confirmation — it takes a capture that actually
+# CHANGES the value to tell a real field from a constant that happens to match.
 #
-# WRITE (power on/off) — the app's SET frame for this group, captured for both
-# states:
-#   aa 18 c3 00 00 00 00 00 00 02 00 01 f4 ff ff ff ff 01 ff ff 00 0b 01 <pwr> <cks>
-#   <pwr> = 0x01 (On) / 0x00 (Off); the two captures are byte-identical apart
-#   from <pwr> and the checksum. Same checksum formula as the query frames.
-#   Note header[9] = 0x02 here (a SET/control request) vs 0x03 for a plain
-#   query — see build_aquapura_split_green_power_command. Setpoint writes are
-#   NOT captured yet (see below), so only power on/off is implemented.
+# POWER — confirmed via a captured ON/OFF mitmproxy pair (SET request +
+# STATUS response, each state): body[13] (raw idx23) = 0x00 Off / 0x01 On,
+# the ONLY body byte that differs between the two responses. mode is reported
+# 0/"Off" or 1/"Heat" (KJRH-120L's convention: query mode 1 maps to
+# HVACMode.HEAT in climate.py, a non-off state, so the card reads ON and the
+# Off button becomes usable).
+#
+# OPERATING MODE ("Eco"/"Disparo") — confirmed via a captured mode-toggle
+# mitmproxy pair: body[14] (raw idx24) = 0x40 "Eco" / 0x80 "Disparo", the ONLY
+# body byte that differs between the two responses. This is the SAME marker
+# byte/encoding as the daily-schedule slots (see below) — the live status and
+# a schedule slot share one mode vocabulary. Distinct from ``mode``/power:
+# surfaced as ``ITSStatus.operating_mode``, a field only this profile
+# populates.
+#
+# WRITE — all three captured toggles (power, operating mode, setpoint) share
+# ONE frame shape, differing only in field id / value length / value:
+#
+#   aa <len> c3 00×6 02 00 01 f4 ff ff ff ff 01 ff ff 00 <fld> <vlen> <value...> <cks>
+#
+#   fld 0x0b, vlen 1: power        (0x01 On / 0x00 Off)
+#   fld 0x0c, vlen 1: op. mode     (0x40 Eco / 0x80 Disparo — schedule's marker)
+#   fld 0x0d, vlen 2: DHW setpoint (16-bit BE tenths °C, e.g. 0x01fe = 51.0)
+#
+# Confirmed byte-exact against 7 real captures (2 power, 2 mode, 3 setpoint:
+# 50→51, 51→52, 52→50) via _build_aquapura_split_green_write. Same checksum
+# formula as the query frames. header[9] = 0x02 here (a SET/control request)
+# vs 0x03 for a plain query — this also explains an earlier oddity: a
+# schedule-frame capture taken right after an app write also had raw[9]=0x02,
+# most likely echoing "this exchange involved a write", not a data field.
 #
 # DELIBERATELY NOT DECODED / NOT WRITABLE:
+#   - body[27]: real data (constant 0x32 across every capture so far), no
+#     confirmed meaning — see the STATUS "wrong turn" note above.
 #   - The ODU frame's other sensors (body[43:45], body[19:21] ≈ the tank, etc.)
 #     and the config frame's (0x00,0x64) limit values: real data, but no app
 #     label to validate them against, so they stay unmapped.
 #   - The 02,62 frame: a different, 9-byte-block schedule layout not shown on
 #     any captured screen, so it is left unmapped rather than guessed.
-#   - Setpoint writes. No SET command for the DHW setpoint has been captured
-#     yet (only power on/off), and the standard 62-byte C3 SET frame is built
-#     from a status query this device does not answer — so set_device still
-#     raises a clear error for a temperature change on this profile, rather
-#     than sending a frame assembled from garbage (see api.set_device).
+#   - Setpoint/power/mode limits: no app-confirmed min/max capture exists for
+#     this model, so the climate entity reuses the KJRH-120L's validated DHW
+#     range (20-70 °C) as a conservative bound — wide enough to cover every
+#     captured value (50-52 °C) without guessing a tighter one.
 #
 # DAILY SCHEDULE ("Tempor. diário", selector 0x02,0x58) — fully decoded and
 # validated against a live screenshot showing all 4 slots (1 enabled, 3
@@ -439,7 +464,10 @@ _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
     0x02: AQUAPURA_SPLIT_GREEN_TANK_SELECTOR,
 }
 
-AQUAPURA_SPLIT_GREEN_DHW_SETPOINT_INDEX = 27
+# STATUS body[15:17] = the live DHW setpoint, 16-bit BE tenths of °C
+# (confirmed by a real 50->51->52->50 capture series — see module notes).
+# body[27] (the original, WRONG guess) is left unmapped.
+AQUAPURA_SPLIT_GREEN_SETPOINT_INDEX = 15
 AQUAPURA_SPLIT_GREEN_TANK_TEMP_INDEX = 30
 AQUAPURA_SPLIT_GREEN_AMBIENT_TEMP_INDEX = 49
 # STATUS body[13] = power: 0x00 Off, non-zero On (confirmed by diffing a real
@@ -448,6 +476,34 @@ AQUAPURA_SPLIT_GREEN_AMBIENT_TEMP_INDEX = 49
 AQUAPURA_SPLIT_GREEN_POWER_INDEX = 13
 AQUAPURA_SPLIT_GREEN_MODE_OFF = 0
 AQUAPURA_SPLIT_GREEN_MODE_ON = 1
+# STATUS body[14] = the "Eco"/"Disparo" operating preset — same marker/
+# encoding as a daily-schedule slot's mode byte (confirmed by a real mode-
+# toggle capture pair — see module notes).
+AQUAPURA_SPLIT_GREEN_OPERATING_MODE_INDEX = 14
+
+# Setpoint range the climate entity clamps to for this profile. No app-
+# confirmed limit capture exists yet; this reuses the KJRH-120L's validated
+# DHW range (issue #35) as a conservative bound wide enough to cover every
+# captured value (50-52 °C) without guessing a tighter one.
+AQUAPURA_SPLIT_GREEN_TEMP_MIN = 20
+AQUAPURA_SPLIT_GREEN_TEMP_MAX = 70
+
+# Write-command field ids (idx21 of the SET frame) and their value length
+# (idx22). See build_aquapura_split_green_* and _build_aquapura_split_green_write.
+AQUAPURA_SPLIT_GREEN_FIELD_POWER = 0x0B
+AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE = 0x0C
+AQUAPURA_SPLIT_GREEN_FIELD_SETPOINT = 0x0D
+
+# Operating-mode marker byte -> app label, shared by the live STATUS frame
+# (body[14]) and a daily-schedule slot's mode byte (slot offset +1) — both
+# confirmed to use the SAME encoding (0x40 Eco / 0x80 Disparo) by diffing real
+# before/after capture pairs. An unrecognised marker is reported as
+# Unknown(0xNN) rather than guessed.
+_AQUAPURA_SPLIT_GREEN_MODE_MARKERS = {0x40: "Eco", 0x80: "Disparo"}
+_AQUAPURA_SPLIT_GREEN_MODE_MARKERS_REVERSE = {
+    v: k for k, v in _AQUAPURA_SPLIT_GREEN_MODE_MARKERS.items()
+}
+
 # 16-bit sentinel for a sensor that is not present/readable.
 AQUAPURA_SPLIT_GREEN_SENSOR_ABSENT = 0x7FFF
 # Plausibility window for a decoded 16-bit temperature. An all-0xff padded or
@@ -513,10 +569,13 @@ def _aquapura_split_green_temp16(body: bytes, index: int) -> float | None:
 def decode_aquapura_split_green_status(body: bytearray | bytes) -> ITSStatus:
     """Decode an Aquapura Split Green (sn8 17186T3A) STATUS frame into an ITSStatus.
 
-    Surfaces the DHW setpoint at body[27] (direct °C) through ``t5s_def`` (which
-    the climate entity's target_temperature reads) and ``set_temperature``, and
-    the power state at body[13] through ``mode``/``mode_name`` — confirmed by
-    diffing a real ON/OFF capture pair (see module notes above).
+    Surfaces the live DHW setpoint at body[15:17] (16-bit BE tenths °C, NOT
+    body[27] — see module notes for the correction) through ``t5s_def`` (which
+    the climate entity's target_temperature reads) and ``set_temperature``; the
+    power state at body[13] through ``mode``/``mode_name``; and the "Eco"/
+    "Disparo" operating preset at body[14] through ``operating_mode``. All
+    three are confirmed by diffing real before/after capture pairs (see module
+    notes above).
     """
     status = ITSStatus()
     status.raw_body = bytes(body)
@@ -534,36 +593,102 @@ def decode_aquapura_split_green_status(body: bytearray | bytes) -> ITSStatus:
             status.mode = AQUAPURA_SPLIT_GREEN_MODE_ON
             status.mode_name = "Heat"
 
-    if len(body) > AQUAPURA_SPLIT_GREEN_DHW_SETPOINT_INDEX:
-        setpoint = body[AQUAPURA_SPLIT_GREEN_DHW_SETPOINT_INDEX]
-        status.t5s_def = float(setpoint)
-        status.set_temperature = setpoint
+    if len(body) > AQUAPURA_SPLIT_GREEN_OPERATING_MODE_INDEX:
+        marker = body[AQUAPURA_SPLIT_GREEN_OPERATING_MODE_INDEX]
+        status.operating_mode = _AQUAPURA_SPLIT_GREEN_MODE_MARKERS.get(
+            marker, f"Unknown(0x{marker:02x})",
+        )
+
+    setpoint = _aquapura_split_green_temp16(
+        bytes(body), AQUAPURA_SPLIT_GREEN_SETPOINT_INDEX,
+    )
+    if setpoint is not None:
+        status.t5s_def = setpoint
+        status.set_temperature = round(setpoint)
 
     return status
+
+
+def _build_aquapura_split_green_write(field_id: int, value: bytes) -> str:
+    """Build an Aquapura Split Green write frame for one (field_id, value).
+
+    Shared shape behind every captured write (power, operating mode, DHW
+    setpoint) — see the module notes for the full field table:
+
+        aa <len> c3 00×6 02 00 01 f4 ff ff ff ff 01 ff ff 00
+            <field_id> <len(value)> <value...> <cks>
+    """
+    prefix = [
+        0xAA, 0x00, 0xC3,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00,
+        0x01, 0xF4,
+        0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0x00,
+        field_id, len(value),
+    ]
+    frame = prefix + list(value)
+    frame[1] = len(frame)
+    frame.append((~sum(frame[1:]) + 1) & 0xFF)
+    return bytes(frame).hex()
 
 
 def build_aquapura_split_green_power_command(power_on: bool) -> str:
     """Return the Aquapura Split Green (sn8 17186T3A) power ON/OFF write command.
 
     Captured from the official app (mitmproxy) toggling power via the KJR-86T3
-    controller: a 25-byte frame, identical for both states except the last
-    data byte (``0x01``=On / ``0x00``=Off) and the checksum. Reproduces both
-    captures byte-exact:
+    controller. Reproduces both captures byte-exact:
     ``build_aquapura_split_green_power_command(True)``  ->
       ``aa18c3000000000000020001f4ffffffff01ffff000b010126``
     ``build_aquapura_split_green_power_command(False)`` ->
       ``aa18c3000000000000020001f4ffffffff01ffff000b010027``
     """
-    frame = [
-        0xAA, 0x18, 0xC3,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x02, 0x00,
-        0x01, 0xF4,
-        0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0x00, 0x0B, 0x01,
-        0x01 if power_on else 0x00,
-    ]
-    frame.append((~sum(frame[1:]) + 1) & 0xFF)
-    return bytes(frame).hex()
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_POWER, bytes([0x01 if power_on else 0x00]),
+    )
+
+
+def build_aquapura_split_green_operating_mode_command(mode: str) -> str:
+    """Return the Aquapura Split Green write command for the "Eco"/"Disparo"
+    operating preset. Captured toggling the mode in the app (mitmproxy);
+    reproduces both captures byte-exact:
+    ``build_aquapura_split_green_operating_mode_command("Eco")``     ->
+      ``aa18c3000000000000020001f4ffffffff01ffff000c0140e6``
+    ``build_aquapura_split_green_operating_mode_command("Disparo")`` ->
+      ``aa18c3000000000000020001f4ffffffff01ffff000c0180a6``
+
+    Raises ``ValueError`` for any other value rather than sending an unproven
+    marker byte.
+    """
+    marker = _AQUAPURA_SPLIT_GREEN_MODE_MARKERS_REVERSE.get(mode)
+    if marker is None:
+        raise ValueError(
+            f"Unknown Aquapura Split Green operating mode: {mode!r} "
+            f"(expected one of {sorted(_AQUAPURA_SPLIT_GREEN_MODE_MARKERS_REVERSE)})"
+        )
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE, bytes([marker]),
+    )
+
+
+def build_aquapura_split_green_setpoint_command(temp_c: float) -> str:
+    """Return the Aquapura Split Green DHW-setpoint write command for ``temp_c``.
+
+    Captured changing the setpoint in the app (mitmproxy), three times in a
+    row (50->51->52->50 °C); reproduces all three byte-exact:
+    ``build_aquapura_split_green_setpoint_command(51)`` ->
+      ``aa19c3000000000000020001f4ffffffff01ffff000d0201fe24``
+    ``build_aquapura_split_green_setpoint_command(52)`` ->
+      ``aa19c3000000000000020001f4ffffffff01ffff000d02020819``
+    ``build_aquapura_split_green_setpoint_command(50)`` ->
+      ``aa19c3000000000000020001f4ffffffff01ffff000d0201f42e``
+
+    ``temp_c`` is encoded as 16-bit BE tenths of °C (e.g. 51 -> 0x01fe = 510),
+    matching the resolution the app's own captured writes use.
+    """
+    tenths = round(temp_c * 10)
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_SETPOINT, tenths.to_bytes(2, "big"),
+    )
 
 
 def decode_aquapura_split_green_tank_temp(body: bytearray | bytes) -> float | None:
@@ -623,12 +748,6 @@ AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT = 4
 # AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE block later.
 AQUAPURA_SPLIT_GREEN_SCHEDULE_FIRST_SLOT_INDEX = 45
 AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_SIZE = 8
-# Mode marker byte (slot offset +1) → app label. Confirmed by toggling
-# Temporiz. 1's mode in the app and diffing the resulting frame: only that one
-# byte (and nothing else in the slot — setpoint/times/active were untouched)
-# changed 0x40 -> 0x80 when the mode switched "ECO" -> "Disparo". An
-# unrecognised marker is reported as Unknown(0xNN) rather than guessed.
-_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES = {0x40: "Eco", 0x80: "Disparo"}
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -673,7 +792,7 @@ def decode_aquapura_split_green_daily_schedule(
         slots.append(
             AquapuraSplitGreenScheduleSlot(
                 active=body[start] != 0,
-                mode=_AQUAPURA_SPLIT_GREEN_SCHEDULE_MODES.get(
+                mode=_AQUAPURA_SPLIT_GREEN_MODE_MARKERS.get(
                     marker, f"Unknown(0x{marker:02x})",
                 ),
                 setpoint=setpoint,
@@ -756,6 +875,8 @@ __all__ = [
     "AQUAPURA_SPLIT_GREEN_SN8",
     "AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_TANK_SELECTOR",
+    "AQUAPURA_SPLIT_GREEN_TEMP_MAX",
+    "AQUAPURA_SPLIT_GREEN_TEMP_MIN",
     "AquapuraSplitGreenScheduleSlot",
     "KJRH120L_DHW_OFF",
     "KJRH120L_DHW_ON",
@@ -765,8 +886,10 @@ __all__ = [
     "ModelProfile",
     "apply_profile_to_sensors",
     "apply_profile_to_status",
+    "build_aquapura_split_green_operating_mode_command",
     "build_aquapura_split_green_power_command",
     "build_aquapura_split_green_query",
+    "build_aquapura_split_green_setpoint_command",
     "build_kjrh120l_set_temperature",
     "build_query_command",
     "decode_aquapura_split_green_ambient_temp",

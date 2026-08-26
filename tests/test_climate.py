@@ -142,6 +142,17 @@ def test_kjrh120l_min_max_widened_to_20_70():
     assert entity.max_temp == 70.0
 
 
+def test_aquapura_split_green_min_max_cover_captured_setpoints():
+    """Split Green min/max must allow the real captured setpoints (50–52 °C).
+
+    No app-confirmed limit is captured for this model, so it reuses the
+    KJRH-120L's validated DHW range (20–70 °C) as a conservative bound.
+    """
+    entity = _climate(AQUAPURA_SPLIT_GREEN_SN8, ITSSensors(), ITSStatus(mode=1))
+    assert entity.min_temp == 20.0
+    assert entity.max_temp == 70.0
+
+
 # --- KJRH-120L power read-back → hvac_mode (issue #35) --------------------
 # The OFF/ON frames differ only in body[10] (and the setpoint/timestamp). The
 # decode must derive power from body[10] so the climate card reads OFF for the
