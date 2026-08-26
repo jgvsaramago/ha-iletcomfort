@@ -8,6 +8,7 @@ from pathlib import Path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
 from .const import CONF_APPLIANCE_CODE, CONF_REGION, DEFAULT_REGION, DOMAIN, PLATFORMS
@@ -16,12 +17,50 @@ from .coordinator import OFFLINE_REPAIR_ID, ILetComfortCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
+def _log_entity_registry_collisions(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Best-effort diagnostic for "Error adding entity ... with platform
+    iletcomfort" failures (issue: entities stuck Unavailable after the
+    now-removed options flow used to add/remove them).
+
+    HA logs a full traceback when async_add_entities fails to add one entity,
+    but the *cause* is almost always that ``entity_id`` in the registry
+    (.storage/core.entity_registry) already belongs to a DIFFERENT
+    unique_id/config_entry than the one this setup is about to register —
+    and that fact isn't visible from the traceback alone, since the registry
+    is mutable state, not something the traceback captures. Logs every
+    registry row for this integration's domain (any config entry, not just
+    this one — a leftover from a stale/duplicate entry would still collide)
+    at DEBUG, so a report can be matched against the failing entity_id.
+    """
+    try:
+        registry = er.async_get(hass)
+        rows = [
+            e for e in registry.entities.values()
+            if e.platform == DOMAIN
+        ]
+    except Exception as err:  # noqa: BLE001 - diagnostic-only, must not block setup
+        _LOGGER.debug("Could not snapshot entity registry: %s", err)
+        return
+    _LOGGER.debug(
+        "entity_registry snapshot (%d rows for domain=%s) ahead of platform setup "
+        "for config_entry=%s:",
+        len(rows), DOMAIN, entry.entry_id,
+    )
+    for row in rows:
+        _LOGGER.debug(
+            "  entity_id=%s unique_id=%s config_entry_id=%s disabled_by=%s",
+            row.entity_id, row.unique_id, row.config_entry_id, row.disabled_by,
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up iLetComfort from a config entry."""
     coordinator = ILetComfortCoordinator(hass, entry)
     await coordinator.async_first_refresh_with_login()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    _log_entity_registry_collisions(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

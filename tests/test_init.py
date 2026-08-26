@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.iletcomfort import async_migrate_entry
+from custom_components.iletcomfort import _log_entity_registry_collisions, async_migrate_entry
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
     CONF_REGION,
     DEFAULT_REGION,
     DOMAIN,
     REGION_EU,
+    REGION_US,
 )
 
 
@@ -151,3 +154,52 @@ async def test_migrate_v2_is_noop(hass: HomeAssistant):
     assert entry.version == 2
     assert entry.unique_id == "user@example.com:APPL1"
     assert entry.data[CONF_REGION] == REGION_EU
+
+
+async def test_log_entity_registry_collisions_logs_every_domain_row(
+    hass: HomeAssistant, caplog,
+):
+    """Diagnostic for "Error adding entity ... with platform iletcomfort":
+    every registry row for this domain must be logged, including one tied to
+    a DIFFERENT (e.g. stale/removed) config entry -- that's exactly the kind
+    of leftover that causes the collision, so it must not be filtered out by
+    only looking at the entry currently being set up.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_REGION: REGION_US,
+            CONF_APPLIANCE_CODE: "APPL1",
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+
+    other_entry = MockConfigEntry(domain=DOMAIN, unique_id="stale:APPL1")
+    other_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, "APPL1_daily_schedule_4_end_time",
+        config_entry=entry,
+    )
+    registry.async_get_or_create(
+        "sensor", DOMAIN, "STALE_daily_schedule_4_end_time",
+        config_entry=other_entry,
+    )
+    # A foreign-domain row must not be logged as if it were ours.
+    registry.async_get_or_create("sensor", "other_integration", "unrelated")
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.iletcomfort"):
+        _log_entity_registry_collisions(hass, entry)
+
+    logged = "\n".join(
+        r.getMessage() for r in caplog.records
+        if r.name == "custom_components.iletcomfort"
+    )
+    assert "APPL1_daily_schedule_4_end_time" in logged
+    assert "STALE_daily_schedule_4_end_time" in logged
+    assert "unrelated" not in logged
