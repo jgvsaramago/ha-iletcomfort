@@ -108,6 +108,20 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._last_on_state
 
     @property
+    def fetch_schedule(self) -> bool:
+        """Return whether the "Fetch daily schedule" option is enabled.
+
+        Read by sensor.py/binary_sensor.py at platform setup to decide whether
+        to register the 20 Daily Schedule entities at all: unlike the
+        diagnostics toggle (which only blanks one value shared by every
+        profile — Outdoor Ambient Temperature — so its entity always stays
+        registered), this one gates a coherent, dedicated block of entities
+        1:1 with a single skippable API call, so disabling it removes them
+        from the device entirely rather than leaving them showing unavailable.
+        """
+        return self._fetch_schedule
+
+    @property
     def sn8(self) -> str | None:
         """Return this appliance's sn8 model code, if known.
 
@@ -276,9 +290,10 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # every other profile). A failure here is bonus config data, not core
         # status/sensors, so it stays at DEBUG and never trips the offline
         # Repair card or a cache-fallback WARNING. The user can disable this
-        # fetch entirely (options flow) to save one cloud command per poll;
-        # when disabled the schedule entities read unavailable rather than a
-        # stale cached value.
+        # fetch entirely (options flow) to save one cloud command per poll —
+        # sensor.py/binary_sensor.py then don't register the Daily Schedule
+        # entities at all (see coordinator.fetch_schedule), so this list is
+        # never read; kept empty rather than stale cached data regardless.
         if self._fetch_schedule:
             try:
                 schedule = await self.hass.async_add_executor_job(

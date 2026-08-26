@@ -41,7 +41,7 @@
         "data_description": {
           "scan_interval": "How often to poll the cloud, in seconds (minimum 30). Lower values react faster but use more API calls.",
           "fetch_diagnostics": "Aquapura Split Green only: also fetches the outdoor ambient / ODU sensor frame, one extra cloud command per poll. Disabling it saves that call, but the Outdoor Ambient Temperature sensor stops updating. No effect on other models — their diagnostic sensors already come from the status/sensors calls made every poll regardless.",
-          "fetch_schedule": "Aquapura Split Green only: fetches the daily-schedule frame, one extra cloud command per poll, feeding the 20 'Daily Schedule' entities (Configuration section). Disabling it saves that call; those entities go unavailable. No effect on other models."
+          "fetch_schedule": "Aquapura Split Green only: fetches the daily-schedule frame, one extra cloud command per poll, feeding the 20 'Daily Schedule' entities (Configuration section). Disabling it saves that call and removes those entities from the device (reload required); re-enabling adds them back. No effect on other models."
         }
       }
     }

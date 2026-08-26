@@ -261,9 +261,17 @@ for a STANDARD/ATW/AQUAPURA/KJRH-120L device is a harmless no-op. For the Split 
   `_query_aquapura_split_green_sensors` — saves one cloud call per poll, costs the Outdoor Ambient
   Temperature sensor (`t4_temp`). Despite the name, it does **not** affect the `entity_category=DIAGNOSTIC`
   sensors on other profiles (condenser/evaporator/odu_voltage/…) — those are decoded from the
-  status/sensors calls already made every poll, so there's no extra call to skip for them.
+  status/sensors calls already made every poll, so there's no extra call to skip for them. The entity
+  itself (Outdoor Ambient Temperature) always stays registered — it's a normal, always-relevant sensor
+  shared by every profile, just blanked (`None`) while this is off — so it is **not** removed like the
+  schedule entities below.
 - `fetch_schedule=False` skips `client.query_daily_schedule` entirely (no network call) — saves one cloud
-  call per poll, costs the 20 `Daily Schedule *` entities (which read unavailable, not stale-cached).
+  call per poll. Unlike `fetch_diagnostics`, this **removes the 20 `Daily Schedule *` entities from the
+  device entirely** (`sensor.py`/`binary_sensor.py`'s `async_setup_entry` filter them out via
+  `coordinator.fetch_schedule` when building the entity list, rather than registering them to sit
+  unavailable/unknown) — they're a coherent block 1:1 with one skippable call, unlike the diagnostics
+  toggle's single shared value, so full removal is the right shape here. Re-enabling adds them back on
+  the next reload (saving the options form always triggers one).
 
 The options form's suggested (pre-filled) values are the entry's *current* saved options, via
 `self.add_suggested_values_to_schema(schema, {...})` — **not** a `vol.Optional(key, default=...)` static

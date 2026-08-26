@@ -10,6 +10,8 @@ from homeassistant.helpers.entity import EntityCategory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.iletcomfort.api import ITSSensors, ITSStatus
+from custom_components.iletcomfort import binary_sensor as binary_sensor_platform
+from custom_components.iletcomfort import sensor as sensor_platform
 from custom_components.iletcomfort.binary_sensor import (
     BINARY_SENSOR_DESCRIPTIONS,
     ILetComfortBinarySensor,
@@ -17,6 +19,7 @@ from custom_components.iletcomfort.binary_sensor import (
 from custom_components.iletcomfort.climate import ILetComfortClimate
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
+    CONF_FETCH_SCHEDULE,
     CONF_REGION,
     DOMAIN,
     REGION_US,
@@ -31,7 +34,9 @@ from custom_components.iletcomfort.sensor import (
 from custom_components.iletcomfort.switch import ILetComfortBoostSwitch
 
 
-def _coordinator(hass: HomeAssistant) -> ILetComfortCoordinator:
+def _coordinator(
+    hass: HomeAssistant, options: dict | None = None,
+) -> ILetComfortCoordinator:
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Pool Heat Pump",
@@ -42,6 +47,7 @@ def _coordinator(hass: HomeAssistant) -> ILetComfortCoordinator:
             CONF_APPLIANCE_CODE: "APPL1",
             CONF_REGION: REGION_US,
         },
+        options=options or {},
         version=2,
     )
     entry.add_to_hass(hass)
@@ -217,3 +223,49 @@ def test_daily_schedule_active_binary_sensor_false_without_schedule_data(
         d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
     )
     assert ILetComfortBinarySensor(coord, desc).is_on is False
+
+
+# --- Daily Schedule entities: removed from the device (not left unavailable)
+# when "Fetch daily schedule" is off, since they're a coherent block 1:1 with
+# one skippable API call — unlike the diagnostics toggle, which only blanks
+# one value (Outdoor Ambient Temperature) shared by every profile and so
+# never removes an entity (see coordinator.fetch_schedule). ------------------
+
+
+async def test_daily_schedule_entities_registered_when_fetch_schedule_enabled(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)  # fetch_schedule defaults to True
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    assert "daily_schedule_1_setpoint" in keys
+    assert "daily_schedule_4_mode" in keys
+
+    added_bs = []
+    await binary_sensor_platform.async_setup_entry(hass, coord.entry, added_bs.extend)
+    bs_keys = {e.entity_description.key for e in added_bs}
+    assert "daily_schedule_1_active" in bs_keys
+
+
+async def test_daily_schedule_entities_absent_when_fetch_schedule_disabled(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass, options={CONF_FETCH_SCHEDULE: False})
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    assert not any(k.startswith("daily_schedule_") for k in keys)
+    # Everything else is still registered.
+    assert "dhw_tank" in keys
+    assert "odu_current" in keys
+
+    added_bs = []
+    await binary_sensor_platform.async_setup_entry(hass, coord.entry, added_bs.extend)
+    bs_keys = {e.entity_description.key for e in added_bs}
+    assert not any(k.startswith("daily_schedule_") for k in bs_keys)
+    assert "compressor_running" in bs_keys

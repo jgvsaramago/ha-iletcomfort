@@ -256,6 +256,9 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
 )
 
 
+_DAILY_SCHEDULE_KEY_PREFIX = "daily_schedule_"
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -263,9 +266,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up sensor entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    descriptions = SENSOR_DESCRIPTIONS
+    if not coordinator.fetch_schedule:
+        # "Fetch daily schedule" is off: remove the 20 Daily Schedule
+        # entities from the device entirely rather than registering them to
+        # sit unavailable/unknown forever (see coordinator.fetch_schedule).
+        descriptions = tuple(
+            d for d in descriptions if not d.key.startswith(_DAILY_SCHEDULE_KEY_PREFIX)
+        )
     async_add_entities(
         ILetComfortSensor(coordinator, description)
-        for description in SENSOR_DESCRIPTIONS
+        for description in descriptions
     )
 
 
