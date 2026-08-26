@@ -581,6 +581,42 @@ _AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS: dict[str, Any] = {
     "tp_temp": None,
 }
 
+# sensor.py/binary_sensor.py keys this profile's decode NEVER populates from
+# any confirmed frame — not just the temps nulled above (which show
+# "unavailable"), but fields decode_aquapura_split_green_status/_sensors
+# simply never touch, so they silently read a class-default 0/False forever:
+# comp_frq, comp_total_run_hours, pressure_h, pressure_l, odu_voltage,
+# odu_current (ITSSensors/ITSStatus all default those to 0), plus the four
+# temps above that DO show "unavailable" but are included here too so
+# sensor.py/binary_sensor.py have one list to filter, not two. Registering
+# these unconditionally would show live-looking-but-fake "0" readings (worse
+# than "unavailable") for values the app doesn't expose for this model at
+# all — confirmed by checking every captured frame's decode against this
+# profile's app screens, none of which show a refrigerant circuit, pressure,
+# or compressor runtime/frequency reading anywhere.
+AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS = frozenset({
+    "water_inlet", "water_outlet", "condenser", "evaporator", "refrigerant",
+    "plate_hx", "compressor_freq", "comp_run_hours", "pressure_high",
+    "pressure_low", "odu_voltage", "odu_current",
+})
+# comp_running/ibh_running: decode_aquapura_split_green_status either forces
+# comp_running=False outright (documented: "no confirmed running signal") or
+# never touches ibh_running at all (ITSStatus default False) — neither ever
+# reflects the real device, so both are hidden rather than shown as a
+# permanently-wrong "off".
+AQUAPURA_SPLIT_GREEN_UNSUPPORTED_BINARY_SENSOR_KEYS = frozenset({
+    "compressor_running", "ibh_running",
+})
+
+# Profiles whose set_device() sends a dedicated captured command (KJRH-120L's
+# short write, the Aquapura Split Green's single-field selector writes)
+# instead of the legacy C3 SET frame that carries ctrl_flag — same root cause
+# as select.py's _MUTE_UNSUPPORTED_PROFILES (which gates the Silent Mode
+# select for the same reason): neither _set_device_kjrh120l nor
+# _set_device_aquapura_split_green accepts a ``boost`` kwarg at all, so a
+# Boost write is silently dropped and does nothing on these models.
+BOOST_UNSUPPORTED_PROFILES = (ModelProfile.KJRH120L, ModelProfile.AQUAPURA_SPLIT_GREEN)
+
 
 def build_aquapura_split_green_query(selector: int, param: int) -> str:
     """Build an Aquapura Split Green (sn8 17186T3A) 21-byte selector query frame.
@@ -1245,6 +1281,9 @@ __all__ = [
     "AQUAPURA_SPLIT_GREEN_TEMP_MAX",
     "AQUAPURA_SPLIT_GREEN_TEMP_MIN",
     "AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR",
+    "AQUAPURA_SPLIT_GREEN_UNSUPPORTED_BINARY_SENSOR_KEYS",
+    "AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS",
+    "BOOST_UNSUPPORTED_PROFILES",
     "AquapuraSplitGreenConsumption",
     "AquapuraSplitGreenDisinfectionSettings",
     "AquapuraSplitGreenScheduleSlot",

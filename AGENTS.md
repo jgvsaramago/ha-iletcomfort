@@ -367,6 +367,35 @@ either.
    this proactively (removes the 4 known-stale unique_ids at setup, best-effort, idempotent) instead of
    waiting for a user report like last time.
 
+**Unsupported entities hidden, not shown reading a fake value.** `decode_aquapura_split_green_status`/
+`_sensors` only ever set a handful of fields (see above); every other `ITSStatus`/`ITSSensors` field this
+profile's entities would otherwise read stays at its Python class default (`0`/`False`, not `None`) —
+worse than the four temps `_AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS` nulls to "unavailable", these would show
+a live-looking-but-permanently-fake reading (a 0 Hz compressor frequency forever, an "Off" that never
+turns on). None of them correspond to anything the app shows for this model — checked against every
+captured screen. `AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS` (water_inlet, water_outlet, condenser,
+evaporator, refrigerant, plate_hx, compressor_freq, comp_run_hours, pressure_high, pressure_low,
+odu_voltage, odu_current) and `_UNSUPPORTED_BINARY_SENSOR_KEYS` (compressor_running, ibh_running) — both in
+`model_profiles.py` — are filtered out of `sensor.py`/`binary_sensor.py`'s `async_setup_entry` for this
+profile. `error_code`/`error` are the one exception kept despite the identical "no confirmed signal, forced
+to a default" justification in the decode's own docstring — not reported as a problem, and losing fault
+visibility is a bigger risk than losing a runtime counter, so it stays unless a report says otherwise.
+
+**Boost is unsupported for Aquapura Split Green *and* KJRH-120L — a real broken-write bug, same root cause
+as Silent Mode.** `sensors.ctrl_flag` (what `is_on` reads) is never set by either profile's sensors decode,
+*and* neither `_set_device_kjrh120l` nor `_set_device_aquapura_split_green` accepts a `boost` kwarg at all —
+confirmed by reading the method signatures, not a live capture — so pressing the switch silently does
+nothing on either model, exactly like Silent Mode's mute/ctrl_flag before it was hidden (§4 above).
+`BOOST_UNSUPPORTED_PROFILES` in `model_profiles.py` gates it out of `switch.py`'s `async_setup_entry`,
+mirroring `select.py`'s `_MUTE_UNSUPPORTED_PROFILES` (kept local/unshared there; Boost's version is shared
+since `__init__.py`'s migration cleanup also needs it — see below).
+
+**Migration:** removing entities a platform used to create without cleanup leaves them "unavailable"
+forever in any existing install — the same class of bug the removed options-flow toggles caused, and that
+`_remove_stale_daily_schedule_binary_sensors` already fixed once for a different entity set. `__init__.py`'s
+`_remove_unsupported_entities` handles this one the same way: best-effort, idempotent, runs after
+`coordinator.sn8` is available (needs it to know which profile's list applies).
+
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).
 - The standard `sensors.twin_temp`/`twout_temp` (sensors bytes 25–26) are `0x23` null-fill → decode to 0

@@ -28,7 +28,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
-from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
+from .model_profiles import (
+    AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT,
+    AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS,
+    ModelProfile,
+    resolve_profile,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -386,9 +391,18 @@ async def async_setup_entry(
 ) -> None:
     """Set up sensor entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    descriptions = SENSOR_DESCRIPTIONS
+    if resolve_profile(coordinator.sn8) is ModelProfile.AQUAPURA_SPLIT_GREEN:
+        # This profile's decode never populates these — see the constant's
+        # docstring in model_profiles.py for why they're hidden rather than
+        # shown reading a permanently-fake 0.
+        descriptions = tuple(
+            d for d in descriptions
+            if d.key not in AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS
+        )
     async_add_entities(
         ILetComfortSensor(coordinator, description)
-        for description in SENSOR_DESCRIPTIONS
+        for description in descriptions
     )
 
 

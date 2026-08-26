@@ -15,7 +15,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
-from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
+from .model_profiles import (
+    AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT,
+    BOOST_UNSUPPORTED_PROFILES,
+    resolve_profile,
+)
 
 
 async def async_setup_entry(
@@ -25,8 +29,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up switch entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        ILetComfortBoostSwitch(coordinator),
+    entities: list[SwitchEntity] = []
+    if resolve_profile(coordinator.sn8) not in BOOST_UNSUPPORTED_PROFILES:
+        # Don't register a control that would sit there doing nothing when
+        # pressed — see BOOST_UNSUPPORTED_PROFILES's docstring.
+        entities.append(ILetComfortBoostSwitch(coordinator))
+    entities += [
         ILetComfortSilenceSwitch(coordinator),
         ILetComfortDisinfectionSwitch(coordinator),
         ILetComfortHeatingElementSwitch(coordinator),
@@ -35,7 +43,8 @@ async def async_setup_entry(
             ILetComfortDailyScheduleActiveSwitch(coordinator, n)
             for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
         ),
-    ])
+    ]
+    async_add_entities(entities)
 
 
 class ILetComfortBoostSwitch(CoordinatorEntity[ILetComfortCoordinator], SwitchEntity):

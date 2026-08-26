@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from unittest.mock import patch
 
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
@@ -13,8 +14,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.iletcomfort import (
     _log_entity_registry_collisions,
     _remove_stale_daily_schedule_binary_sensors,
+    _remove_unsupported_entities,
     async_migrate_entry,
 )
+from custom_components.iletcomfort.coordinator import ILetComfortCoordinator
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
     CONF_REGION,
@@ -256,3 +259,122 @@ async def test_remove_stale_daily_schedule_binary_sensors_removes_all_four_slots
 
     # Idempotent: running it again (e.g. next reload) must not raise.
     _remove_stale_daily_schedule_binary_sensors(hass, entry)
+
+
+def _coordinator_with_sn8(hass: HomeAssistant, entry: MockConfigEntry, sn8: str | None) -> ILetComfortCoordinator:
+    with patch("custom_components.iletcomfort.coordinator.ILetComfortClient"):
+        coord = ILetComfortCoordinator(hass, entry)
+    if sn8 is not None:
+        coord.appliance_meta = {"sn8": sn8}
+    return coord
+
+
+async def test_remove_unsupported_entities_for_aquapura_split_green(
+    hass: HomeAssistant,
+):
+    """Sensors/binary_sensors this profile's decode never populates, plus
+    Boost, are removed; everything else (and other profiles) is untouched.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_REGION: REGION_US,
+            CONF_APPLIANCE_CODE: "APPL1",
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+    coord = _coordinator_with_sn8(hass, entry, "17186T3A")  # Aquapura Split Green
+
+    registry = er.async_get(hass)
+    stale = [
+        registry.async_get_or_create(
+            "sensor", DOMAIN, "APPL1_water_inlet", config_entry=entry,
+        ),
+        registry.async_get_or_create(
+            "binary_sensor", DOMAIN, "APPL1_compressor_running", config_entry=entry,
+        ),
+        registry.async_get_or_create(
+            "switch", DOMAIN, "APPL1_boost", config_entry=entry,
+        ),
+    ]
+    survivor = registry.async_get_or_create(
+        "sensor", DOMAIN, "APPL1_dhw_tank", config_entry=entry,
+    )
+
+    _remove_unsupported_entities(hass, entry, coord)
+
+    for entry_reg in stale:
+        assert registry.async_get(entry_reg.entity_id) is None
+    assert registry.async_get(survivor.entity_id) is not None
+
+    # Idempotent.
+    _remove_unsupported_entities(hass, entry, coord)
+
+
+async def test_remove_unsupported_entities_leaves_standard_profile_alone(
+    hass: HomeAssistant,
+):
+    """A STANDARD-profile device (no appliance_meta) must keep these entities
+    -- they're only unsupported for Aquapura Split Green / KJRH-120L.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_REGION: REGION_US,
+            CONF_APPLIANCE_CODE: "APPL1",
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+    coord = _coordinator_with_sn8(hass, entry, None)  # unknown sn8 -> STANDARD
+
+    registry = er.async_get(hass)
+    survivor = registry.async_get_or_create(
+        "binary_sensor", DOMAIN, "APPL1_compressor_running", config_entry=entry,
+    )
+
+    _remove_unsupported_entities(hass, entry, coord)
+
+    assert registry.async_get(survivor.entity_id) is not None
+
+
+async def test_remove_unsupported_entities_removes_boost_for_kjrh120l(
+    hass: HomeAssistant,
+):
+    """Boost is unsupported for KJRH-120L too (its set_device() also lacks a
+    boost kwarg), even though the sensor/binary_sensor list is Aquapura
+    Split Green-only.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_REGION: REGION_US,
+            CONF_APPLIANCE_CODE: "APPL1",
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+    coord = _coordinator_with_sn8(hass, entry, "17100003")  # KJRH-120L
+
+    registry = er.async_get(hass)
+    stale_boost = registry.async_get_or_create(
+        "switch", DOMAIN, "APPL1_boost", config_entry=entry,
+    )
+    survivor = registry.async_get_or_create(
+        "binary_sensor", DOMAIN, "APPL1_compressor_running", config_entry=entry,
+    )
+
+    _remove_unsupported_entities(hass, entry, coord)
+
+    assert registry.async_get(stale_boost.entity_id) is None
+    assert registry.async_get(survivor.entity_id) is not None

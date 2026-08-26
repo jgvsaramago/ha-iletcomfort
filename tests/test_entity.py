@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -382,6 +383,109 @@ async def test_silent_mode_select_absent_for_kjrh120l(hass: HomeAssistant):
     assert added == []
 
 
+# --- Sensors/binary_sensors/Boost this profile's decode never populates
+# with real data: hidden rather than shown reading a permanently-fake
+# 0/False. See AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS/
+# _BINARY_SENSOR_KEYS/BOOST_UNSUPPORTED_PROFILES in model_profiles.py. -----
+
+
+async def test_unsupported_sensors_absent_for_aquapura_split_green(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    for key in (
+        "water_inlet", "water_outlet", "condenser", "evaporator", "refrigerant",
+        "plate_hx", "compressor_freq", "comp_run_hours", "pressure_high",
+        "pressure_low", "odu_voltage", "odu_current",
+    ):
+        assert key not in keys, key
+    # Everything else stays.
+    assert "dhw_tank" in keys
+    assert "outdoor_ambient" in keys
+    assert "total_energy" in keys
+    assert "error_code" in keys
+
+
+async def test_unsupported_sensors_present_for_standard_profile(hass: HomeAssistant):
+    coord = _coordinator(hass)  # no appliance_meta -> sn8 None -> STANDARD
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    for key in (
+        "water_inlet", "water_outlet", "condenser", "evaporator", "refrigerant",
+        "plate_hx", "compressor_freq", "comp_run_hours", "pressure_high",
+        "pressure_low", "odu_voltage", "odu_current",
+    ):
+        assert key in keys, key
+
+
+async def test_unsupported_binary_sensors_absent_for_aquapura_split_green(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await binary_sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    assert "compressor_running" not in keys
+    assert "ibh_running" not in keys
+    assert "error" in keys
+
+
+async def test_unsupported_binary_sensors_present_for_standard_profile(
+    hass: HomeAssistant,
+):
+    coord = _coordinator(hass)
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await binary_sensor_platform.async_setup_entry(hass, coord.entry, added.extend)
+    keys = {e.entity_description.key for e in added}
+    assert "compressor_running" in keys
+    assert "ibh_running" in keys
+
+
+async def test_boost_switch_absent_for_aquapura_split_green(hass: HomeAssistant):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17186T3A"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await switch_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert not any(isinstance(e, ILetComfortBoostSwitch) for e in added)
+    # Everything else on this platform still registers.
+    assert any(isinstance(e, ILetComfortSilenceSwitch) for e in added)
+
+
+async def test_boost_switch_absent_for_kjrh120l(hass: HomeAssistant):
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": "17100003"}
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await switch_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert not any(isinstance(e, ILetComfortBoostSwitch) for e in added)
+
+
+async def test_boost_switch_present_for_standard_profile(hass: HomeAssistant):
+    coord = _coordinator(hass)
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+
+    added = []
+    await switch_platform.async_setup_entry(hass, coord.entry, added.extend)
+    assert any(isinstance(e, ILetComfortBoostSwitch) for e in added)
+
+
 async def test_full_integration_setup_adds_every_entity_without_error(
     hass: HomeAssistant, caplog,
 ):
@@ -459,3 +563,18 @@ async def test_full_integration_setup_adds_every_entity_without_error(
     assert not any(
         e.startswith("binary_sensor.") and "daily_schedule" in e for e in entity_ids
     )
+    # Entities this profile's decode never populates with real data -- checked
+    # via the registry (unique_id is deterministic; entity_id substring
+    # matching against a friendly name is not, e.g. "comp_run_hours" is not a
+    # substring of the "compressor_run_hours" slug it produces).
+    registry = er.async_get(hass)
+    for domain, key in (
+        [("sensor", k) for k in (
+            "water_inlet", "water_outlet", "condenser", "evaporator",
+            "refrigerant", "plate_hx", "compressor_freq", "comp_run_hours",
+            "pressure_high", "pressure_low", "odu_voltage", "odu_current",
+        )]
+        + [("binary_sensor", k) for k in ("compressor_running", "ibh_running")]
+        + [("switch", "boost")]
+    ):
+        assert registry.async_get_entity_id(domain, DOMAIN, f"APPL1_{key}") is None, key

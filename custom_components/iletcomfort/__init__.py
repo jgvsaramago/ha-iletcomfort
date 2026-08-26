@@ -87,6 +87,65 @@ def _remove_stale_daily_schedule_binary_sensors(
         _LOGGER.debug("Could not remove stale daily-schedule entities: %s", err)
 
 
+def _remove_unsupported_entities(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: ILetComfortCoordinator,
+) -> None:
+    """Remove entities this device's profile never populates with real data.
+
+    sensor.py/binary_sensor.py/switch.py now skip creating these at setup
+    (see AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS/
+    _BINARY_SENSOR_KEYS/BOOST_UNSUPPORTED_PROFILES in model_profiles.py for
+    why), but any entity already registered from before that filtering
+    existed would otherwise linger "unavailable" forever — the same class of
+    bug _remove_stale_daily_schedule_binary_sensors already handles for a
+    different entity set, so this follows the same proactive pattern rather
+    than waiting for a report. Needs ``coordinator.sn8``, so must run after
+    ``async_first_refresh_with_login``. Best-effort, never blocks setup.
+    """
+    # Imported lazily to match this codebase's consistent style for
+    # model_profiles imports elsewhere (api.py imports it lazily to avoid a
+    # real cycle there; no cycle exists for this module, but keeping the
+    # import next to its one use here is simplest).
+    from .model_profiles import (
+        AQUAPURA_SPLIT_GREEN_UNSUPPORTED_BINARY_SENSOR_KEYS,
+        AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS,
+        BOOST_UNSUPPORTED_PROFILES,
+        ModelProfile,
+        resolve_profile,
+    )
+
+    appliance_code = entry.data.get(CONF_APPLIANCE_CODE, "")
+    if not appliance_code:
+        return
+
+    profile = resolve_profile(coordinator.sn8)
+    to_remove: list[tuple[str, str]] = []
+    if profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
+        to_remove += [
+            ("sensor", key) for key in AQUAPURA_SPLIT_GREEN_UNSUPPORTED_SENSOR_KEYS
+        ]
+        to_remove += [
+            ("binary_sensor", key)
+            for key in AQUAPURA_SPLIT_GREEN_UNSUPPORTED_BINARY_SENSOR_KEYS
+        ]
+    if profile in BOOST_UNSUPPORTED_PROFILES:
+        to_remove.append(("switch", "boost"))
+
+    try:
+        registry = er.async_get(hass)
+        for domain, key in to_remove:
+            unique_id = f"{appliance_code}_{key}"
+            entity_id = registry.async_get_entity_id(domain, DOMAIN, unique_id)
+            if entity_id is not None:
+                registry.async_remove(entity_id)
+                _LOGGER.info(
+                    "Removed unsupported entity %s (this device's profile never "
+                    "reports real data for it)", entity_id,
+                )
+    except Exception as err:  # noqa: BLE001 - best-effort, must not block setup
+        _LOGGER.debug("Could not remove unsupported entities: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up iLetComfort from a config entry."""
     coordinator = ILetComfortCoordinator(hass, entry)
@@ -96,6 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _log_entity_registry_collisions(hass, entry)
     _remove_stale_daily_schedule_binary_sensors(hass, entry)
+    _remove_unsupported_entities(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
