@@ -52,6 +52,7 @@ from custom_components.iletcomfort.model_profiles import (
     build_aquapura_split_green_operating_mode_command,
     build_aquapura_split_green_power_command,
     build_aquapura_split_green_query,
+    build_aquapura_split_green_schedule_active_command,
     build_aquapura_split_green_setpoint_command,
     build_aquapura_split_green_silence_command,
     build_kjrh120l_set_temperature,
@@ -1373,6 +1374,101 @@ def test_query_daily_schedule_other_profiles_send_no_command():
         assert client.query_daily_schedule("APPL1", sn8=KJRH120L_SN8) == []
 
     send.assert_not_called()
+
+
+# Real schedule-slot activate/deactivate captures. Slot 1 (field 0x2a): both
+# ON and OFF captured, diffing shows body[45] as the only byte that changes.
+# Slot 2 (field 0x31): only ON captured; the response ALSO shows the slot's
+# start/end hour changed (a separate, deliberate time edit made in the same
+# app session, not part of this write) -- so only field id 0x31 and its
+# body[53] effect are trusted here, not the time bytes.
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_COMMAND = (
+    "aa18c300000000000002000258ffffffff01ffff002a0100a3"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_COMMAND = (
+    "aa18c300000000000002000258ffffffff01ffff002a0101a2"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_2_ON_COMMAND = (
+    "aa18c300000000000002000258ffffffff01ffff003101019b"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,8a,07,04,00,40,01,f4,0b,00,13,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,76"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_RAW = _bytes(
+    "aa,57,c3,00,00,00,00,00,00,02,00,02,58,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,1a,08,19,1a,08,"
+    "1f,ff,01,0e,00,02,8a,07,04,01,40,01,f4,0b,00,13,00,00,40,02,58,0e,00,"
+    "12,00,00,40,02,58,14,00,17,00,00,40,02,58,00,00,07,00,75"
+)
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_BODY = AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_RAW[10:-1]
+AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_BODY = AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_RAW[10:-1]
+
+
+def test_aquapura_split_green_schedule_slot1_active_from_real_capture_pair():
+    """body[45] is confirmed as slot 1's active byte by a real ON/OFF pair --
+    matches decode_aquapura_split_green_daily_schedule's existing offset.
+    """
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_BODY))
+        if AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_BODY[i]
+    ]
+    assert diffs == [45]
+    assert AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_BODY[45] == 0x00
+    assert AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_BODY[45] == 0x01
+
+
+def test_build_aquapura_split_green_schedule_active_command_matches_captured_commands():
+    """Confirmed slots (1, 2) reproduce the real captures byte-exact."""
+    assert (
+        build_aquapura_split_green_schedule_active_command(1, False)
+        == AQUAPURA_SPLIT_GREEN_SCHEDULE_1_OFF_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_schedule_active_command(1, True)
+        == AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_schedule_active_command(2, True)
+        == AQUAPURA_SPLIT_GREEN_SCHEDULE_2_ON_COMMAND
+    )
+
+
+def test_build_aquapura_split_green_schedule_active_command_extrapolated_slots():
+    """Slots 3-4 are an informed extrapolation (+7 field id per slot, not a
+    real capture) -- pinned here so a future real capture that contradicts
+    this table fails a test instead of silently drifting.
+    """
+    assert (
+        build_aquapura_split_green_schedule_active_command(3, True)
+        == "aa18c300000000000002000258ffffffff01ffff0038010194"
+    )
+    assert (
+        build_aquapura_split_green_schedule_active_command(4, True)
+        == "aa18c300000000000002000258ffffffff01ffff003f01018d"
+    )
+
+
+def test_build_aquapura_split_green_schedule_active_command_rejects_bad_slot():
+    with pytest.raises(ValueError, match="Unknown Aquapura Split Green schedule slot"):
+        build_aquapura_split_green_schedule_active_command(5, True)
+    with pytest.raises(ValueError, match="Unknown Aquapura Split Green schedule slot"):
+        build_aquapura_split_green_schedule_active_command(0, True)
+
+
+def test_set_schedule_active_sends_captured_command():
+    """set_schedule_active sends the real captured write command."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_RAW.hex()) as send:
+        result = client.set_schedule_active("APPL1", slot=1, enabled=True)
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_SCHEDULE_1_ON_COMMAND,
+    )
+    assert result["effective_slot"] == 1
+    assert result["effective_enabled"] is True
 
 
 # Real disinfection ("Desinfecção") capture series, all in the same 02,58

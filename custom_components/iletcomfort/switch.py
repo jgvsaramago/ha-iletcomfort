@@ -8,12 +8,14 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
+from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
 
 
 async def async_setup_entry(
@@ -29,6 +31,10 @@ async def async_setup_entry(
         ILetComfortDisinfectionSwitch(coordinator),
         ILetComfortHeatingElementSwitch(coordinator),
         ILetComfortForceDisinfectionSwitch(coordinator),
+        *(
+            ILetComfortDailyScheduleActiveSwitch(coordinator, n)
+            for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
+        ),
     ])
 
 
@@ -218,3 +224,52 @@ class ILetComfortForceDisinfectionSwitch(
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_force_disinfection(enabled=False)
+
+
+class ILetComfortDailyScheduleActiveSwitch(
+    CoordinatorEntity[ILetComfortCoordinator], SwitchEntity,
+):
+    """Switch entity for activating/deactivating Aquapura Split Green daily
+    schedule ("Temporiz. N") slot ``slot`` (1-4).
+
+    entity_category=CONFIG is correct here (unlike the OTHER daily-schedule
+    fields, which stay DIAGNOSTIC sensors — see sensor.py's note): this is
+    the one daily-schedule field the user can actually change, which is
+    exactly what CONFIG means. Slots 1-2's write is confirmed byte-exact
+    against real captures; slots 3-4's field id is an informed extrapolation
+    (see build_aquapura_split_green_schedule_active_command's module notes)
+    — if a real capture ever contradicts it, trust the capture. Only that
+    profile's coordinator data ever populates ``coordinator.data["schedule"]``;
+    every other profile leaves it empty, so this reads "off" for them.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:calendar-clock"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: ILetComfortCoordinator, slot: int) -> None:
+        super().__init__(coordinator)
+        self._slot = slot
+        self._attr_name = f"Daily Schedule {slot} Active"
+        self._attr_unique_id = f"{coordinator.appliance_code}_daily_schedule_{slot}_active"
+        self._attr_device_info = build_device_info(coordinator)
+
+    @property
+    def is_on(self) -> bool:
+        if self.coordinator.data is None:
+            return False
+        schedule = self.coordinator.data.get("schedule")
+        if not schedule or len(schedule) < self._slot:
+            return False
+        return bool(schedule[self._slot - 1].active)
+
+    async def _async_set(self, enabled: bool) -> None:
+        await self.coordinator.async_set_schedule_active(
+            slot=self._slot, enabled=enabled,
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_set(False)

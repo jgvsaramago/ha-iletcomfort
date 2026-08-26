@@ -10,7 +10,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.iletcomfort import _log_entity_registry_collisions, async_migrate_entry
+from custom_components.iletcomfort import (
+    _log_entity_registry_collisions,
+    _remove_stale_daily_schedule_binary_sensors,
+    async_migrate_entry,
+)
 from custom_components.iletcomfort.const import (
     CONF_APPLIANCE_CODE,
     CONF_REGION,
@@ -203,3 +207,52 @@ async def test_log_entity_registry_collisions_logs_every_domain_row(
     assert "APPL1_daily_schedule_4_end_time" in logged
     assert "STALE_daily_schedule_4_end_time" in logged
     assert "unrelated" not in logged
+
+
+async def test_remove_stale_daily_schedule_binary_sensors_removes_all_four_slots(
+    hass: HomeAssistant,
+):
+    """"Daily Schedule N Active" moved from binary_sensor to switch (see
+    switch.py). Any leftover binary_sensor registry row from before that
+    move must be removed, not left "unavailable" forever -- exactly the
+    class of bug the old options-flow fetch toggles caused.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com:APPL1",
+        data={
+            CONF_EMAIL: "user@example.com",
+            CONF_PASSWORD: "secret",
+            CONF_REGION: REGION_US,
+            CONF_APPLIANCE_CODE: "APPL1",
+        },
+        version=2,
+    )
+    entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    stale_ids = []
+    for slot in range(1, 5):
+        entry_reg = registry.async_get_or_create(
+            "binary_sensor", DOMAIN, f"APPL1_daily_schedule_{slot}_active",
+            config_entry=entry,
+        )
+        stale_ids.append(entry_reg.entity_id)
+    # A same-named switch entity (the replacement) must survive untouched.
+    live_switch = registry.async_get_or_create(
+        "switch", DOMAIN, "APPL1_daily_schedule_1_active", config_entry=entry,
+    )
+    # An unrelated binary_sensor must survive untouched too.
+    unrelated = registry.async_get_or_create(
+        "binary_sensor", DOMAIN, "APPL1_compressor_running", config_entry=entry,
+    )
+
+    _remove_stale_daily_schedule_binary_sensors(hass, entry)
+
+    for entity_id in stale_ids:
+        assert registry.async_get(entity_id) is None
+    assert registry.async_get(live_switch.entity_id) is not None
+    assert registry.async_get(unrelated.entity_id) is not None
+
+    # Idempotent: running it again (e.g. next reload) must not raise.
+    _remove_stale_daily_schedule_binary_sensors(hass, entry)

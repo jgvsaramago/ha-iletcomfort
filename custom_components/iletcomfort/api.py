@@ -813,6 +813,21 @@ class ILetComfortClient:
         )
         return decode_aquapura_split_green_daily_schedule(body)
 
+    def set_schedule_active(
+        self, appliance_code: str, *, slot: int, enabled: bool,
+    ) -> dict[str, Any]:
+        """Send the Aquapura Split Green write command activating/deactivating
+        daily-schedule ``slot`` (1-4).
+        """
+        from .model_profiles import build_aquapura_split_green_schedule_active_command
+
+        command = build_aquapura_split_green_schedule_active_command(slot, enabled)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {
+            "sent": command, "response": response_hex,
+            "effective_slot": slot, "effective_enabled": enabled,
+        }
+
     def query_disinfection(
         self, appliance_code: str, sn8: str | None = None,
     ) -> Any:

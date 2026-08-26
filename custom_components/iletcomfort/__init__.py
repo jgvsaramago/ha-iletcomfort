@@ -53,6 +53,40 @@ def _log_entity_registry_collisions(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
 
+def _remove_stale_daily_schedule_binary_sensors(
+    hass: HomeAssistant, entry: ConfigEntry,
+) -> None:
+    """Remove the old "Daily Schedule N Active" binary_sensor entities.
+
+    They moved to switch.py (activating/deactivating a slot is now a
+    confirmed write, so CONFIG-category switch is the correct domain — see
+    binary_sensor.py's note). binary_sensor.py simply no longer creates
+    them, but HA does NOT retroactively delete entities a platform stops
+    creating — the exact "stuck Unavailable" class of bug this integration
+    already shipped once (options-flow fetch toggles) and had to add
+    _log_entity_registry_collisions to diagnose. This time, proactively
+    remove the specific known-stale unique_ids instead of waiting for a
+    report: best-effort, never blocks setup.
+    """
+    appliance_code = entry.data.get(CONF_APPLIANCE_CODE, "")
+    if not appliance_code:
+        return
+    try:
+        registry = er.async_get(hass)
+        for slot in range(1, 5):
+            unique_id = f"{appliance_code}_daily_schedule_{slot}_active"
+            entity_id = registry.async_get_entity_id(
+                "binary_sensor", DOMAIN, unique_id,
+            )
+            if entity_id is not None:
+                registry.async_remove(entity_id)
+                _LOGGER.info(
+                    "Removed stale entity %s (replaced by a switch)", entity_id,
+                )
+    except Exception as err:  # noqa: BLE001 - best-effort, must not block setup
+        _LOGGER.debug("Could not remove stale daily-schedule entities: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up iLetComfort from a config entry."""
     coordinator = ILetComfortCoordinator(hass, entry)
@@ -61,6 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     _log_entity_registry_collisions(hass, entry)
+    _remove_stale_daily_schedule_binary_sensors(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

@@ -886,6 +886,32 @@ async def test_async_set_force_disinfection_forwards_to_client(hass: HomeAssista
     coord.async_request_refresh.assert_awaited_once()
 
 
+async def test_async_set_schedule_active_forwards_to_client_and_forces_refetch(
+    hass: HomeAssistant,
+):
+    """The Daily Schedule Active switch's write path forwards straight to
+    the client, and clears _last_config_fetch so the next poll refetches
+    the schedule immediately instead of waiting out CONFIG_FETCH_INTERVAL.
+    """
+    entry = _entry(REGION_US)
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.iletcomfort.coordinator.ILetComfortClient"
+    ) as mock_cls:
+        coord = ILetComfortCoordinator(hass, entry)
+
+    client = mock_cls.return_value
+    coord.async_request_refresh = AsyncMock()
+    coord._last_config_fetch = dt_util.utcnow()
+
+    await coord.async_set_schedule_active(slot=2, enabled=True)
+
+    assert client.set_schedule_active.call_args.args == ("APPL1",)
+    assert client.set_schedule_active.call_args.kwargs == {"slot": 2, "enabled": True}
+    assert coord._last_config_fetch is None
+    coord.async_request_refresh.assert_awaited_once()
+
+
 def _degraded_coordinator(hass: HomeAssistant) -> tuple[ILetComfortCoordinator, MagicMock]:
     """Build a coordinator wired so both queries fall back to cache."""
     entry = _entry(REGION_US)

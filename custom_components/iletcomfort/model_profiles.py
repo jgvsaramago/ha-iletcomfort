@@ -1015,6 +1015,50 @@ def decode_aquapura_split_green_daily_schedule(
     return slots
 
 
+# Per-slot "active" field ids for the schedule-slot write (selector 02,58,
+# single-field shape — same as power/silence/heating element, NOT the
+# disinfection multi-field shape). Slot 1 (field 0x2a) and slot 2 (field
+# 0x31) are CONFIRMED byte-exact against real activate/deactivate (slot 1)
+# and activate (slot 2) captures — diffing shows body[45]/body[53]
+# (exactly the read-side slot-active bytes) as the only field-write effect.
+# Slots 3 and 4 (0x38, 0x3f) are NOT captured — extrapolated from the +7
+# spacing between slots 1 and 2, which lines up structurally with the
+# 8-byte read-side slot layout (1 active + 7 other field ids: mode,
+# setpoint, start_h, start_m, end_h, end_m => slot 1 spans field ids
+# 0x2a-0x30, so slot 2 starting at 0x31 is exactly "the next slot"). This is
+# a deliberate, informed extrapolation (not a blind guess) made at the
+# maintainer's explicit request; if a real capture ever contradicts it,
+# trust the capture and fix this table.
+_AQUAPURA_SPLIT_GREEN_SCHEDULE_ACTIVE_FIELD_IDS = {1: 0x2A, 2: 0x31, 3: 0x38, 4: 0x3F}
+
+
+def build_aquapura_split_green_schedule_active_command(slot: int, enabled: bool) -> str:
+    """Return the write command for activating/deactivating daily-schedule
+    ``slot`` (1-4 — "Temporiz. N" in the app).
+
+    Same single-field shape as power/silence/heating element, on the
+    schedule selector (02,58) instead of STATUS/TIMERS. Reproduces the real
+    captures byte-exact:
+    ``build_aquapura_split_green_schedule_active_command(1, False)`` ->
+      ``aa18c300000000000002000258ffffffff01ffff002a0100a3``
+    ``build_aquapura_split_green_schedule_active_command(1, True)``  ->
+      ``aa18c300000000000002000258ffffffff01ffff002a0101a2``
+    ``build_aquapura_split_green_schedule_active_command(2, True)``  ->
+      ``aa18c300000000000002000258ffffffff01ffff003101019b``
+
+    Raises ``ValueError`` for a slot outside 1-4.
+    """
+    field_id = _AQUAPURA_SPLIT_GREEN_SCHEDULE_ACTIVE_FIELD_IDS.get(slot)
+    if field_id is None:
+        raise ValueError(
+            f"Unknown Aquapura Split Green schedule slot: {slot!r} (expected 1-4)"
+        )
+    return _build_aquapura_split_green_write(
+        field_id, bytes([0x01 if enabled else 0x00]),
+        selector=AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR,
+    )
+
+
 # Disinfection ("Desinfecção") settings, packed in the SAME 02,58 frame as the
 # daily schedule, just before the first schedule slot (body[45]). Confirmed by
 # a real capture series: opening the app's Desinfecção submenu (ON, 65 °C,
@@ -1218,6 +1262,7 @@ __all__ = [
     "build_aquapura_split_green_force_disinfection_command",
     "build_aquapura_split_green_heating_element_command",
     "build_aquapura_split_green_query",
+    "build_aquapura_split_green_schedule_active_command",
     "build_aquapura_split_green_setpoint_command",
     "build_aquapura_split_green_silence_command",
     "build_kjrh120l_set_temperature",

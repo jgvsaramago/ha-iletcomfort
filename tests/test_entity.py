@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
@@ -31,6 +31,7 @@ from custom_components.iletcomfort.model_profiles import (
     AquapuraSplitGreenScheduleSlot,
 )
 from custom_components.iletcomfort import select as select_platform
+from custom_components.iletcomfort import switch as switch_platform
 from custom_components.iletcomfort.select import ILetComfortMuteSelect
 from custom_components.iletcomfort.sensor import (
     SENSOR_DESCRIPTIONS,
@@ -38,6 +39,7 @@ from custom_components.iletcomfort.sensor import (
 )
 from custom_components.iletcomfort.switch import (
     ILetComfortBoostSwitch,
+    ILetComfortDailyScheduleActiveSwitch,
     ILetComfortDisinfectionSwitch,
     ILetComfortForceDisinfectionSwitch,
     ILetComfortHeatingElementSwitch,
@@ -83,6 +85,7 @@ def test_all_platforms_share_one_device(hass: HomeAssistant):
         ILetComfortDisinfectionSwitch(coord),
         ILetComfortHeatingElementSwitch(coord),
         ILetComfortForceDisinfectionSwitch(coord),
+        ILetComfortDailyScheduleActiveSwitch(coord, 1),
         ILetComfortMuteSelect(coord),
     ]
 
@@ -151,12 +154,14 @@ def test_primary_entities_are_not_diagnostic():
 
 
 def test_daily_schedule_entities_are_categorized_diagnostic():
-    """The daily-schedule entities represent the device's own timer
-    configuration, but must use entity_category=DIAGNOSTIC, not CONFIG:
-    HA's SensorEntity/BinarySensorEntity reject CONFIG at add-time with a
-    HomeAssistantError ("cannot be added as the entity category is set to
-    config") since CONFIG is reserved for entities the user can change
-    (switch/number/select), not read-only sensors.
+    """The read-only daily-schedule fields must use entity_category=
+    DIAGNOSTIC, not CONFIG: HA's SensorEntity/BinarySensorEntity reject
+    CONFIG at add-time with a HomeAssistantError ("cannot be added as the
+    entity category is set to config") since CONFIG is reserved for
+    entities the user can change (switch/number/select), not read-only
+    sensors. "Active" is the one field the user CAN change (see
+    switch.py's ILetComfortDailyScheduleActiveSwitch), so it correctly
+    uses CONFIG instead — checked in test_daily_schedule_active_switch_*.
     """
     for key in (
         "daily_schedule_1_setpoint", "daily_schedule_1_start_time",
@@ -164,11 +169,6 @@ def test_daily_schedule_entities_are_categorized_diagnostic():
     ):
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
         assert desc.entity_category is EntityCategory.DIAGNOSTIC, key
-
-    desc = next(
-        d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
-    )
-    assert desc.entity_category is EntityCategory.DIAGNOSTIC, "daily_schedule_1_active"
 
 
 def test_daily_schedule_sensors_read_the_named_slot(hass: HomeAssistant):
@@ -274,37 +274,46 @@ def test_daily_schedule_sensors_none_without_schedule_data(hass: HomeAssistant):
     assert ILetComfortSensor(coord, desc).native_value is None
 
 
-def test_daily_schedule_active_binary_sensors_read_the_named_slot(
-    hass: HomeAssistant,
-):
-    """Daily Schedule N Active reflects slot N-1's active flag."""
+def test_daily_schedule_active_switch_reads_the_named_slot(hass: HomeAssistant):
+    """Daily Schedule N Active switch reflects slot N-1's active flag."""
     coord = _coordinator(hass)
     coord.data["schedule"] = [
         AquapuraSplitGreenScheduleSlot(active=True),
         AquapuraSplitGreenScheduleSlot(active=False),
     ]
 
-    def _is_on(key: str) -> bool:
-        desc = next(d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == key)
-        return ILetComfortBinarySensor(coord, desc).is_on
-
-    assert _is_on("daily_schedule_1_active") is True
-    assert _is_on("daily_schedule_2_active") is False
+    assert ILetComfortDailyScheduleActiveSwitch(coord, 1).is_on is True
+    assert ILetComfortDailyScheduleActiveSwitch(coord, 2).is_on is False
     # Out-of-range / missing slot → False, not a crash.
-    assert _is_on("daily_schedule_3_active") is False
+    assert ILetComfortDailyScheduleActiveSwitch(coord, 3).is_on is False
 
 
-def test_daily_schedule_active_binary_sensor_false_without_schedule_data(
+def test_daily_schedule_active_switch_false_without_schedule_data(
     hass: HomeAssistant,
 ):
     """No schedule key (STANDARD/other profiles) → Active reads False."""
     coord = _coordinator(hass)
     assert "schedule" not in coord.data
 
-    desc = next(
-        d for d in BINARY_SENSOR_DESCRIPTIONS if d.key == "daily_schedule_1_active"
-    )
-    assert ILetComfortBinarySensor(coord, desc).is_on is False
+    assert ILetComfortDailyScheduleActiveSwitch(coord, 1).is_on is False
+
+
+async def test_daily_schedule_active_switch_writes_the_named_slot(
+    hass: HomeAssistant,
+):
+    """Turning the switch on/off calls async_set_schedule_active with the
+    right slot number.
+    """
+    coord = _coordinator(hass)
+    coord.async_set_schedule_active = AsyncMock()
+    switch = ILetComfortDailyScheduleActiveSwitch(coord, 3)
+
+    await switch.async_turn_on()
+    coord.async_set_schedule_active.assert_awaited_once_with(slot=3, enabled=True)
+
+    coord.async_set_schedule_active.reset_mock()
+    await switch.async_turn_off()
+    coord.async_set_schedule_active.assert_awaited_once_with(slot=3, enabled=False)
 
 
 # --- Daily Schedule entities: always registered, like every other entity in
@@ -326,8 +335,13 @@ async def test_daily_schedule_entities_are_always_registered(hass: HomeAssistant
     added_bs = []
     await binary_sensor_platform.async_setup_entry(hass, coord.entry, added_bs.extend)
     bs_keys = {e.entity_description.key for e in added_bs}
-    assert "daily_schedule_1_active" in bs_keys
     assert "compressor_running" in bs_keys
+
+    added_sw = []
+    await switch_platform.async_setup_entry(hass, coord.entry, added_sw.extend)
+    sw_unique_ids = {e.unique_id for e in added_sw}
+    assert f"{coord.appliance_code}_daily_schedule_1_active" in sw_unique_ids
+    assert f"{coord.appliance_code}_boost" in sw_unique_ids
 
 
 # --- Silent Mode select: hidden for profiles whose set_device() bypasses the
@@ -430,9 +444,18 @@ async def test_full_integration_setup_adds_every_entity_without_error(
 
     entity_ids = hass.states.async_entity_ids()
     assert any("daily_schedule_1_setpoint" in e for e in entity_ids)
-    assert any("daily_schedule_1_active" in e for e in entity_ids)
     assert any(e.startswith("switch.") and "heating_element" in e for e in entity_ids)
     assert any("disinfection_temperature" in e for e in entity_ids)
     assert any(e.startswith("switch.") and "disinfection" in e for e in entity_ids)
     assert any(e.startswith("switch.") and "force_disinfection" in e for e in entity_ids)
     assert any("day_energy" in e for e in entity_ids)
+    for slot in (1, 2, 3, 4):
+        assert any(
+            e.startswith("switch.") and f"daily_schedule_{slot}_active" in e
+            for e in entity_ids
+        )
+    # The old read-only binary_sensor of the same name must NOT be created
+    # anymore -- it moved to switch.py.
+    assert not any(
+        e.startswith("binary_sensor.") and "daily_schedule" in e for e in entity_ids
+    )

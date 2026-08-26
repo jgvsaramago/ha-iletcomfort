@@ -329,17 +329,43 @@ either.
 3. Setpoint/power/mode **limits**: no app-confirmed min/max capture exists, so the climate entity reuses
    the KJRH-120L's validated DHW range (`AQUAPURA_SPLIT_GREEN_TEMP_MIN/MAX` = 20-70 °C) as a conservative
    bound — wide enough for the captured 50-52 °C values without guessing a tighter one.
-4. **Daily schedule writes (activate/deactivate a slot, edit its setpoint/start/end/mode) are NOT
-   captured.** The daily-schedule read (§ above) is fully decoded, but no mitmproxy capture exists of the
-   app actually writing a schedule-slot change — unlike Disinfection (also on `02,58`), where 5 real
-   before/after write captures exist. Do not guess a write frame for this: the field-id/byte-layout pattern
-   established by Disinfection's multi-field write is a plausible *shape* to expect, but guessing the actual
-   field ids/offsets for schedule slots without a capture risks silently corrupting a user's real timer
-   config. Needs the same capture methodology as Silence/Disinfection/Heating-Element before it can be
-   exposed as a writable entity (and only then would `entity_category=CONFIG` become valid for it — CONFIG
-   is fine for a domain that supports write actions, e.g. `switch`/`number`/`select`, but never for a plain
-   read-only `sensor`/`binary_sensor`, which is why the existing read-only Daily Schedule entities use
-   DIAGNOSTIC — see §6 above).
+4. **Daily schedule slot activate/deactivate — CONFIRMED for slots 1-2, EXTRAPOLATED for 3-4.** Single-field
+   write on the schedule selector (`02,58`) — the same shape as power/silence/heating element, NOT
+   Disinfection's multi-field shape:
+
+       aa <len> c3 00×6 02 00 02 58 ff ff ff ff 01 ff ff 00 <fld> 01 <value> <cks>
+
+       fld 0x2a: slot 1 active   fld 0x31: slot 2 active
+       fld 0x38: slot 3 active (EXTRAPOLATED)   fld 0x3f: slot 4 active (EXTRAPOLATED)
+
+   Slot 1: a real ON/OFF capture pair diffs to exactly `body[45]` (the same byte the *read* decode already
+   uses) — clean. Slot 2: only ON was captured, and diffing also showed `body[57]`/`body[59]` (the slot's
+   start/end hour) change — confirmed by the reporter to be a *separate* time edit made in the same app
+   session, not a side effect of the write, so only field `0x31` → `body[53]` is trusted from it. Slots 3-4
+   have **no captures at all**; `0x38`/`0x3f` come from extrapolating the `+7` field-id spacing between slots
+   1 and 2, which lines up structurally with the 8-byte read-side slot layout (1 active byte + 7 other field
+   ids covering mode/setpoint/start_h/start_m/end_h/end_m — so slot 1 occupies `0x2a`-`0x30` and slot 2
+   starting at `0x31` is exactly "the next slot"). This is a deliberate, structurally-reasoned extrapolation
+   made at the maintainer's explicit request (not the project's default "don't guess" posture) — **if a real
+   capture for slot 3 or 4 ever contradicts `_AQUAPURA_SPLIT_GREEN_SCHEDULE_ACTIVE_FIELD_IDS`, trust the
+   capture and fix the table**, don't rationalize the mismatch away.
+
+   `build_aquapura_split_green_schedule_active_command`/`api.py`'s `set_schedule_active` implement this;
+   `coordinator.async_set_schedule_active` also resets `_last_config_fetch` to force an immediate schedule
+   refetch on the next poll (otherwise a slot the user just toggled could keep reading stale for up to
+   `CONFIG_FETCH_INTERVAL`). Surfaced as **switch.py**'s `ILetComfortDailyScheduleActiveSwitch` (one per
+   slot 1-4), which replaced the old read-only `binary_sensor.py` "Daily Schedule N Active" entities — now
+   that it's a confirmed write, `entity_category=CONFIG` is the correct category (unlike the other
+   daily-schedule fields, which stay DIAGNOSTIC sensors since they're still read-only — see §6). Editing a
+   slot's setpoint/start/end/mode (as opposed to just activate/deactivate) is still NOT captured — don't
+   guess those field ids without a capture.
+
+   **Migration note:** removing the old binary_sensor entities without cleanup would leave them
+   "unavailable" forever in any existing install (HA doesn't retroactively delete entities a platform stops
+   creating) — exactly the class of bug the old options-flow fetch toggles caused (see the note on the
+   removed options flow, §5 code map). `__init__.py`'s `_remove_stale_daily_schedule_binary_sensors` handles
+   this proactively (removes the 4 known-stale unique_ids at setup, best-effort, idempotent) instead of
+   waiting for a user report like last time.
 
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).

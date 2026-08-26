@@ -539,3 +539,24 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 lambda: self.client.set_force_disinfection(self.appliance_code, **kwargs)
             )
         await self.async_request_refresh()
+
+    async def async_set_schedule_active(self, **kwargs: Any) -> None:
+        """Send a schedule-slot activate/deactivate SET command with auto
+        re-auth, then refresh data.
+
+        Forces the next poll to refetch the daily schedule immediately,
+        bypassing CONFIG_FETCH_INTERVAL — otherwise a switch flipped here
+        could keep reading its pre-write state for up to 5 minutes.
+        """
+        try:
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_schedule_active(self.appliance_code, **kwargs)
+            )
+        except AuthError:
+            _LOGGER.info("Auth error during set, re-authenticating")
+            await self._async_login()
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_schedule_active(self.appliance_code, **kwargs)
+            )
+        self._last_config_fetch = None
+        await self.async_request_refresh()

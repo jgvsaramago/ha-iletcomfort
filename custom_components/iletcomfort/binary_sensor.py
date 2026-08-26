@@ -19,7 +19,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
-from .model_profiles import AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -27,19 +26,6 @@ class ILetComfortBinarySensorDescription(BinarySensorEntityDescription):
     """Describe an iLetComfort binary sensor."""
 
     is_on_fn: Any  # Callable[[dict], bool]
-
-
-def _schedule_slot_active(index: int) -> Any:
-    """Helper: is Aquapura Split Green daily-schedule slot ``index`` (0-based)
-    active. False if there's no schedule data for this device/poll or the
-    slot index is out of range (e.g. STANDARD-profile devices).
-    """
-    def _is_on(data: dict[str, Any]) -> bool:
-        schedule = data.get("schedule")
-        if not schedule or len(schedule) <= index:
-            return False
-        return bool(schedule[index].active)
-    return _is_on
 
 
 BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
@@ -69,17 +55,15 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[ILetComfortBinarySensorDescription, ...] = (
             data.get("status") is not None and data["status"].error_code != 0
         ),
     ),
-    # entity_category must be DIAGNOSTIC, not CONFIG — see the note in
-    # sensor.py (HA's BinarySensorEntity rejects CONFIG at add-time).
-    *(
-        ILetComfortBinarySensorDescription(
-            key=f"daily_schedule_{n}_active",
-            name=f"Daily Schedule {n} Active",
-            entity_category=EntityCategory.DIAGNOSTIC,
-            is_on_fn=_schedule_slot_active(n - 1),
-        )
-        for n in range(1, AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT + 1)
-    ),
+    # "Daily Schedule N Active" used to live here as a read-only binary_sensor.
+    # Now that activating/deactivating a slot is a confirmed write (see
+    # switch.py's ILetComfortDailyScheduleActiveSwitch), it's a switch
+    # instead — CONFIG is the correct category for something the user can
+    # change, which a binary_sensor can never be (see the sensor.py note on
+    # why the OTHER daily-schedule fields stay DIAGNOSTIC). See
+    # __init__.py's _remove_stale_daily_schedule_binary_sensors for the
+    # matching entity-registry cleanup so the old entities don't linger
+    # "unavailable".
 )
 
 
