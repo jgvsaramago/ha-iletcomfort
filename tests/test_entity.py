@@ -524,17 +524,18 @@ async def test_full_integration_setup_adds_every_entity_without_error(
         ]
         client.query_status.return_value = ITSStatus(mode=1)
         client.query_sensors.return_value = ITSSensors()
-        client.query_daily_schedule.return_value = [
-            AquapuraSplitGreenScheduleSlot(
-                active=True, mode="Eco", setpoint=50.0,
-                start_time="09:00", end_time="21:00",
+        client.query_schedule_and_disinfection.return_value = (
+            [
+                AquapuraSplitGreenScheduleSlot(
+                    active=True, mode="Eco", setpoint=50.0,
+                    start_time="09:00", end_time="21:00",
+                ),
+            ],
+            AquapuraSplitGreenDisinfectionSettings(
+                enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
             ),
-        ]
-        client.query_disinfection.return_value = AquapuraSplitGreenDisinfectionSettings(
-            enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
         )
-        client.query_heating_element.return_value = True
-        client.query_force_disinfection.return_value = False
+        client.query_timers.return_value = (True, False)
         client.query_consumption.return_value = AquapuraSplitGreenConsumption(
             day=1.12, week=4.90, month=4.90, year=4.90, total=4.90,
         )

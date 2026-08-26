@@ -9,7 +9,6 @@ from datetime import timedelta
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.iletcomfort.api import ApiError, ITSSensors, ITSStatus
@@ -22,7 +21,6 @@ from custom_components.iletcomfort.const import (
     REGION_US,
 )
 from custom_components.iletcomfort.coordinator import (
-    CONFIG_FETCH_INTERVAL,
     SCHEDULE_WRITE_SETTLE_SECONDS,
     OFFLINE_REPAIR_ID,
     OFFLINE_REPAIR_THRESHOLD,
@@ -155,6 +153,10 @@ async def test_single_transient_failure_logs_debug_not_warning(
 
     client = mock_cls.return_value
     coord.data = {"status": ITSStatus(mode=1), "sensors": ITSSensors()}
+    # Keep the "bonus" fetches quiet so only status/sensors fallbacks are
+    # counted below.
+    client.query_schedule_and_disinfection.return_value = ([], None)
+    client.query_timers.return_value = (None, None)
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -428,8 +430,11 @@ def test_coordinator_uses_default_scan_interval(hass: HomeAssistant):
     assert coord.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
 
 
-async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant):
-    """A poll fetches the daily schedule and threads sn8 to it, like status/sensors."""
+async def test_poll_fetches_schedule_and_disinfection_together(hass: HomeAssistant):
+    """A poll fetches the daily schedule AND disinfection settings with ONE
+    call (they share the 02,58 frame — see query_schedule_and_disinfection),
+    threading sn8 to it like status/sensors.
+    """
     entry = _entry(REGION_US)
     entry.add_to_hass(hass)
     with patch(
@@ -442,7 +447,8 @@ async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant)
     client.query_status.return_value = ITSStatus(mode=0)
     client.query_sensors.return_value = ITSSensors()
     schedule = [object(), object(), object(), object()]
-    client.query_daily_schedule.return_value = schedule
+    disinfection = object()
+    client.query_schedule_and_disinfection.return_value = (schedule, disinfection)
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -450,17 +456,21 @@ async def test_poll_fetches_daily_schedule_and_forwards_sn8(hass: HomeAssistant)
     ):
         result = await coord._poll()
 
-    client.query_daily_schedule.assert_called_once_with("APPL1", "17186T3A")
+    client.query_schedule_and_disinfection.assert_called_once_with("APPL1", "17186T3A")
+    client.query_daily_schedule.assert_not_called()
+    client.query_disinfection.assert_not_called()
     assert result["schedule"] is schedule
+    assert result["disinfection"] is disinfection
 
 
-async def test_poll_skips_schedule_refetch_within_config_fetch_interval(
+async def test_poll_schedule_and_disinfection_failure_falls_back_to_cache(
     hass: HomeAssistant,
 ):
-    """A second poll within CONFIG_FETCH_INTERVAL of the last schedule fetch
-    reuses the cached schedule instead of hitting the cloud again -- but
-    every other query (status/sensors/disinfection/heating element/force
-    disinfection/consumption) still runs on the normal 60s cadence.
+    """A schedule/disinfection-fetch failure keeps BOTH cached values, not
+    None/empty.
+
+    This is bonus config data (not core status/sensors), so it degrades
+    quietly to cache rather than raising or blanking the related entities.
     """
     entry = _entry(REGION_US)
     entry.add_to_hass(hass)
@@ -473,103 +483,14 @@ async def test_poll_skips_schedule_refetch_within_config_fetch_interval(
     client.query_status.return_value = ITSStatus(mode=0)
     client.query_sensors.return_value = ITSSensors()
     cached_schedule = [object()]
-    coord.data = {"status": ITSStatus(), "sensors": ITSSensors(), "schedule": cached_schedule}
-    # Simulate a schedule fetch that "just happened" a moment ago.
-    coord._last_config_fetch = dt_util.utcnow()
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
-    client.query_daily_schedule.assert_not_called()
-    assert result["schedule"] is cached_schedule
-    client.query_disinfection.assert_called_once()
-    client.query_heating_element.assert_called_once()
-    client.query_force_disinfection.assert_called_once()
-    client.query_consumption.assert_called_once()
-
-
-async def test_poll_refetches_schedule_after_config_fetch_interval_elapses(
-    hass: HomeAssistant,
-):
-    """Once CONFIG_FETCH_INTERVAL has passed since the last schedule fetch,
-    the next poll fetches it again.
-    """
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
-    fresh_schedule = [object()]
-    client.query_daily_schedule.return_value = fresh_schedule
-    coord.data = {"status": ITSStatus(), "sensors": ITSSensors(), "schedule": [object()]}
-    coord._last_config_fetch = dt_util.utcnow() - CONFIG_FETCH_INTERVAL - timedelta(seconds=1)
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
-    client.query_daily_schedule.assert_called_once()
-    assert result["schedule"] is fresh_schedule
-
-
-async def test_poll_fetches_disinfection_and_forwards_sn8(hass: HomeAssistant):
-    """A poll fetches disinfection settings and threads sn8 to it, alongside schedule."""
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    coord.appliance_meta = {"sn8": "17186T3A"}
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
-    disinfection = object()
-    client.query_disinfection.return_value = disinfection
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
-    client.query_disinfection.assert_called_once_with("APPL1", "17186T3A")
-    assert result["disinfection"] is disinfection
-
-
-async def test_poll_disinfection_failure_falls_back_to_cache(hass: HomeAssistant):
-    """A disinfection-fetch failure keeps the cached settings, not None.
-
-    This is bonus config data (not core status/sensors), so it degrades
-    quietly to cache rather than raising or blanking the Disinfection switch.
-    """
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
     cached_disinfection = object()
     coord.data = {
-        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [],
-        "disinfection": cached_disinfection,
+        "status": ITSStatus(), "sensors": ITSSensors(),
+        "schedule": cached_schedule, "disinfection": cached_disinfection,
     }
-    client.query_disinfection.side_effect = ApiError("code=1214, msg=System error")
+    client.query_schedule_and_disinfection.side_effect = ApiError(
+        "code=1214, msg=System error",
+    )
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -577,12 +498,15 @@ async def test_poll_disinfection_failure_falls_back_to_cache(hass: HomeAssistant
     ):
         result = await coord._poll()
 
+    assert result["schedule"] is cached_schedule
     assert result["disinfection"] is cached_disinfection
     assert result["status"].mode == 0
 
 
-async def test_poll_fetches_heating_element_and_forwards_sn8(hass: HomeAssistant):
-    """A poll fetches the heating element state and threads sn8 to it."""
+async def test_poll_fetches_timers_together(hass: HomeAssistant):
+    """A poll fetches the heating element AND Force Disinfection states with
+    ONE call (they share the 01,90 TIMERS frame — see query_timers).
+    """
     entry = _entry(REGION_US)
     entry.add_to_hass(hass)
     with patch(
@@ -594,7 +518,7 @@ async def test_poll_fetches_heating_element_and_forwards_sn8(hass: HomeAssistant
     client = mock_cls.return_value
     client.query_status.return_value = ITSStatus(mode=0)
     client.query_sensors.return_value = ITSSensors()
-    client.query_heating_element.return_value = True
+    client.query_timers.return_value = (True, False)
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -602,15 +526,18 @@ async def test_poll_fetches_heating_element_and_forwards_sn8(hass: HomeAssistant
     ):
         result = await coord._poll()
 
-    client.query_heating_element.assert_called_once_with("APPL1", "17186T3A")
+    client.query_timers.assert_called_once_with("APPL1", "17186T3A")
+    client.query_heating_element.assert_not_called()
+    client.query_force_disinfection.assert_not_called()
     assert result["heating_element"] is True
+    assert result["force_disinfection"] is False
 
 
-async def test_poll_heating_element_failure_falls_back_to_cache(hass: HomeAssistant):
-    """A heating-element-fetch failure keeps the cached value, not None.
+async def test_poll_timers_failure_falls_back_to_cache(hass: HomeAssistant):
+    """A timers-fetch failure keeps BOTH cached values, not None.
 
     This is bonus config data (not core status/sensors), so it degrades
-    quietly to cache rather than raising or blanking the switch.
+    quietly to cache rather than raising or blanking the related switches.
     """
     entry = _entry(REGION_US)
     entry.add_to_hass(hass)
@@ -624,9 +551,9 @@ async def test_poll_heating_element_failure_falls_back_to_cache(hass: HomeAssist
     client.query_sensors.return_value = ITSSensors()
     coord.data = {
         "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [],
-        "heating_element": True,
+        "heating_element": True, "force_disinfection": True,
     }
-    client.query_heating_element.side_effect = ApiError("code=1214, msg=System error")
+    client.query_timers.side_effect = ApiError("code=1214, msg=System error")
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -635,58 +562,6 @@ async def test_poll_heating_element_failure_falls_back_to_cache(hass: HomeAssist
         result = await coord._poll()
 
     assert result["heating_element"] is True
-    assert result["status"].mode == 0
-
-
-async def test_poll_fetches_force_disinfection_and_forwards_sn8(hass: HomeAssistant):
-    """A poll fetches Force Disinfection state and threads sn8 to it."""
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    coord.appliance_meta = {"sn8": "17186T3A"}
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
-    client.query_force_disinfection.return_value = True
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
-    client.query_force_disinfection.assert_called_once_with("APPL1", "17186T3A")
-    assert result["force_disinfection"] is True
-
-
-async def test_poll_force_disinfection_failure_falls_back_to_cache(hass: HomeAssistant):
-    """A Force-Disinfection-fetch failure keeps the cached value, not None."""
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
-    coord.data = {
-        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": [],
-        "force_disinfection": True,
-    }
-    client.query_force_disinfection.side_effect = ApiError("code=1214, msg=System error")
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
     assert result["force_disinfection"] is True
     assert result["status"].mode == 0
 
@@ -743,39 +618,6 @@ async def test_poll_consumption_failure_falls_back_to_cache(hass: HomeAssistant)
         result = await coord._poll()
 
     assert result["consumption"] is cached_consumption
-    assert result["status"].mode == 0
-
-
-async def test_poll_daily_schedule_failure_falls_back_to_cache(hass: HomeAssistant):
-    """A schedule-fetch failure keeps the cached schedule, not an empty one.
-
-    This is bonus config data (not core status/sensors), so it degrades
-    quietly to cache rather than raising or blanking the schedule entities.
-    """
-    entry = _entry(REGION_US)
-    entry.add_to_hass(hass)
-    with patch(
-        "custom_components.iletcomfort.coordinator.ILetComfortClient"
-    ) as mock_cls:
-        coord = ILetComfortCoordinator(hass, entry)
-
-    client = mock_cls.return_value
-    client.query_status.return_value = ITSStatus(mode=0)
-    client.query_sensors.return_value = ITSSensors()
-    cached_schedule = [object()]
-    coord.data = {
-        "status": ITSStatus(), "sensors": ITSSensors(), "schedule": cached_schedule,
-    }
-    client.query_daily_schedule.side_effect = ApiError("code=1214, msg=System error")
-
-    with patch(
-        "custom_components.iletcomfort.coordinator.asyncio.sleep",
-        new=AsyncMock(),
-    ):
-        result = await coord._poll()
-
-    assert result["schedule"] is cached_schedule
-    # Status/sensors are unaffected by the schedule fetch failing.
     assert result["status"].mode == 0
 
 
@@ -887,12 +729,12 @@ async def test_async_set_force_disinfection_forwards_to_client(hass: HomeAssista
     coord.async_request_refresh.assert_awaited_once()
 
 
-async def test_async_set_schedule_active_forwards_to_client_and_forces_refetch(
+async def test_async_set_schedule_active_forwards_to_client_and_settles(
     hass: HomeAssistant,
 ):
     """The Daily Schedule Active switch's write path forwards straight to
-    the client, and clears _last_config_fetch so the next poll refetches
-    the schedule immediately instead of waiting out CONFIG_FETCH_INTERVAL.
+    the client, waiting SCHEDULE_WRITE_SETTLE_SECONDS before refreshing so
+    the device has time to commit the change first.
     """
     entry = _entry(REGION_US)
     entry.add_to_hass(hass)
@@ -903,7 +745,6 @@ async def test_async_set_schedule_active_forwards_to_client_and_forces_refetch(
 
     client = mock_cls.return_value
     coord.async_request_refresh = AsyncMock()
-    coord._last_config_fetch = dt_util.utcnow()
 
     with patch(
         "custom_components.iletcomfort.coordinator.asyncio.sleep",
@@ -914,7 +755,6 @@ async def test_async_set_schedule_active_forwards_to_client_and_forces_refetch(
     assert client.set_schedule_active.call_args.args == ("APPL1",)
     assert client.set_schedule_active.call_args.kwargs == {"slot": 2, "enabled": True}
     mock_sleep.assert_awaited_once_with(SCHEDULE_WRITE_SETTLE_SECONDS)
-    assert coord._last_config_fetch is None
     coord.async_request_refresh.assert_awaited_once()
 
 

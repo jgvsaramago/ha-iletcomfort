@@ -1348,30 +1348,43 @@ def test_build_query_command_aquapura_split_green_schedule_selector():
     assert build_aquapura_split_green_query(0x02, 0x58) == expected
 
 
-def test_query_daily_schedule_aquapura_split_green_sends_schedule_frame():
-    """query_daily_schedule with the Split Green sn8 sends 02,58 and decodes it."""
+def test_query_schedule_and_disinfection_aquapura_split_green_sends_one_command():
+    """query_schedule_and_disinfection with the Split Green sn8 sends 02,58
+    ONCE and decodes BOTH the schedule slots and the disinfection settings
+    from that single response -- the optimization that replaced separate
+    query_daily_schedule/query_disinfection calls.
+    """
     client = _make_client()
     with patch_send(client, AQUAPURA_SPLIT_GREEN_SCHEDULE_RAW.hex()) as send:
-        slots = client.query_daily_schedule("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+        slots, disinfection = client.query_schedule_and_disinfection(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+        )
 
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x02, 0x58)],
     )
     assert slots[0].active is True
     assert slots[0].setpoint == 50.0
+    assert disinfection is not None
+    assert disinfection.temperature == 65.0
 
 
-def test_query_daily_schedule_other_profiles_send_no_command():
+def test_query_schedule_and_disinfection_other_profiles_send_no_command():
     """Devices without this frame (unknown sn8, or another profile) cost
 
-    nothing: no command is sent and an empty list is returned, since only the
-    Aquapura Split Green has a "Tempor. diário" frame to fetch.
+    nothing: no command is sent and ([], None) is returned, since only the
+    Aquapura Split Green has this frame.
     """
     client = _make_client()
     with patch_send(client, "should never be used") as send:
-        assert client.query_daily_schedule("APPL1", sn8=None) == []
-        assert client.query_daily_schedule("APPL1", sn8=ATW_SN8) == []
-        assert client.query_daily_schedule("APPL1", sn8=KJRH120L_SN8) == []
+        assert client.query_schedule_and_disinfection("APPL1", sn8=None) == ([], None)
+        assert (
+            client.query_schedule_and_disinfection("APPL1", sn8=ATW_SN8) == ([], None)
+        )
+        assert (
+            client.query_schedule_and_disinfection("APPL1", sn8=KJRH120L_SN8)
+            == ([], None)
+        )
 
     send.assert_not_called()
 
@@ -1628,11 +1641,16 @@ def test_build_aquapura_split_green_disinfection_command_matches_captured_comman
     )
 
 
-def test_query_disinfection_aquapura_split_green_sends_schedule_frame():
-    """query_disinfection with the Split Green sn8 sends 02,58 and decodes it."""
+def test_query_schedule_and_disinfection_decodes_disinfection_precisely():
+    """query_schedule_and_disinfection's disinfection half decodes to the
+    exact settings from a real capture (same fixture the standalone
+    decode_aquapura_split_green_disinfection tests already validate).
+    """
     client = _make_client()
     with patch_send(client, AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_RAW.hex()) as send:
-        settings = client.query_disinfection("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+        _slots, settings = client.query_schedule_and_disinfection(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+        )
 
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x02, 0x58)],
@@ -1640,17 +1658,6 @@ def test_query_disinfection_aquapura_split_green_sends_schedule_frame():
     assert settings == AquapuraSplitGreenDisinfectionSettings(
         enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
     )
-
-
-def test_query_disinfection_other_profiles_send_no_command():
-    """Devices without this frame cost nothing: no command sent, None returned."""
-    client = _make_client()
-    with patch_send(client, "should never be used") as send:
-        assert client.query_disinfection("APPL1", sn8=None) is None
-        assert client.query_disinfection("APPL1", sn8=ATW_SN8) is None
-        assert client.query_disinfection("APPL1", sn8=KJRH120L_SN8) is None
-
-    send.assert_not_called()
 
 
 def test_set_disinfection_sends_captured_command():
@@ -1740,27 +1747,36 @@ def test_build_aquapura_split_green_heating_element_command_matches_captured_com
     )
 
 
-def test_query_heating_element_aquapura_split_green_sends_timers_frame():
-    """query_heating_element with the Split Green sn8 sends 01,90 and decodes it."""
+def test_query_timers_aquapura_split_green_sends_one_command():
+    """query_timers with the Split Green sn8 sends 01,90 ONCE and decodes
+    BOTH the heating element and Force Disinfection bits from that single
+    response -- the optimization that replaced separate
+    query_heating_element/query_force_disinfection calls.
+    """
     client = _make_client()
     with patch_send(
         client, AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_RAW.hex(),
     ) as send:
-        result = client.query_heating_element("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+        heating_element, force_disinfection = client.query_timers(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+        )
 
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0x90)],
     )
-    assert result is True
+    assert heating_element is True
+    assert force_disinfection is False
 
 
-def test_query_heating_element_other_profiles_send_no_command():
-    """Devices without this frame cost nothing: no command sent, None returned."""
+def test_query_timers_other_profiles_send_no_command():
+    """Devices without this frame cost nothing: no command sent, (None, None)
+    returned.
+    """
     client = _make_client()
     with patch_send(client, "should never be used") as send:
-        assert client.query_heating_element("APPL1", sn8=None) is None
-        assert client.query_heating_element("APPL1", sn8=ATW_SN8) is None
-        assert client.query_heating_element("APPL1", sn8=KJRH120L_SN8) is None
+        assert client.query_timers("APPL1", sn8=None) == (None, None)
+        assert client.query_timers("APPL1", sn8=ATW_SN8) == (None, None)
+        assert client.query_timers("APPL1", sn8=KJRH120L_SN8) == (None, None)
 
     send.assert_not_called()
 
@@ -1846,29 +1862,23 @@ def test_build_aquapura_split_green_force_disinfection_command_matches_captured_
     )
 
 
-def test_query_force_disinfection_aquapura_split_green_sends_timers_frame():
-    """query_force_disinfection with the Split Green sn8 sends 01,90 and decodes it."""
+def test_query_timers_decodes_force_disinfection_precisely():
+    """query_timers's Force Disinfection half decodes to True from the real
+    "Force Disinfection ON" capture (same fixture the standalone
+    decode_aquapura_split_green_force_disinfection tests already validate).
+    """
     client = _make_client()
     with patch_send(
         client, AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_RAW.hex(),
     ) as send:
-        result = client.query_force_disinfection("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+        _heating_element, force_disinfection = client.query_timers(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8,
+        )
 
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0x90)],
     )
-    assert result is True
-
-
-def test_query_force_disinfection_other_profiles_send_no_command():
-    """Devices without this frame cost nothing: no command sent, None returned."""
-    client = _make_client()
-    with patch_send(client, "should never be used") as send:
-        assert client.query_force_disinfection("APPL1", sn8=None) is None
-        assert client.query_force_disinfection("APPL1", sn8=ATW_SN8) is None
-        assert client.query_force_disinfection("APPL1", sn8=KJRH120L_SN8) is None
-
-    send.assert_not_called()
+    assert force_disinfection is True
 
 
 def test_set_force_disinfection_sends_captured_command():

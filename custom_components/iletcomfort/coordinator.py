@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,6 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import dt as dt_util
 
 from .api import (
     ApiError,
@@ -53,15 +52,6 @@ OFFLINE_REPAIR_ID = "device_offline_{entry_id}"
 # cadence as the offline Repair card) warrants a single WARNING (issue #44).
 SUSTAINED_FAILURE_THRESHOLD = 5
 
-# How often the daily schedule (the only Configuration-category "bonus"
-# fetch gated like this — disinfection/heating element/force
-# disinfection/consumption stay on the normal 60s poll) is refetched. A user
-# edits their timer config occasionally, not every minute, so refetching it
-# every 60s poll wastes cloud API calls for no benefit — this decouples its
-# cadence from DEFAULT_SCAN_INTERVAL without adding a second
-# DataUpdateCoordinator or a user-facing setting.
-CONFIG_FETCH_INTERVAL = timedelta(minutes=5)
-
 # How long to wait after a schedule-slot activate/deactivate write before
 # refetching it. Refreshing immediately raced the device: a query fired
 # right after the write could still read back the pre-write value, making
@@ -97,9 +87,6 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             / f"iletcomfort_token_{entry.entry_id}"
         )
         self._last_on_state: tuple[int, int] | None = None
-        # When the daily schedule was last (attempted to be) refetched — see
-        # CONFIG_FETCH_INTERVAL.
-        self._last_config_fetch: datetime | None = None
         # Track per-query cache-fallback state. ``_status_degraded`` /
         # ``_sensors_degraded`` drive the offline Repair card (issue #5). The
         # ``*_fail_streak`` counters drive log-level escalation: a query only
@@ -280,67 +267,38 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # current_temperature and Water Inlet sensor read). STANDARD is a no-op.
         sensors = apply_profile_to_sensors(resolve_profile(sn8), sensors, status)
 
-        # Daily schedule (Configuration category) — the only one of these
-        # "bonus" fetches gated to CONFIG_FETCH_INTERVAL rather than every
-        # poll: a user edits their timer config occasionally, not every
-        # minute, so refetching it every 60s wastes cloud API calls. A
-        # failure here stays at DEBUG and never trips the offline Repair
-        # card or a cache-fallback WARNING; only the Aquapura Split Green
-        # actually has this frame (query_daily_schedule returns [] with no
-        # network call for every other profile).
-        now = dt_util.utcnow()
-        schedule_fetch_due = (
-            self._last_config_fetch is None
-            or now - self._last_config_fetch >= CONFIG_FETCH_INTERVAL
-        )
-        if schedule_fetch_due:
-            self._last_config_fetch = now
-            try:
-                schedule = await self.hass.async_add_executor_job(
-                    self.client.query_daily_schedule, self.appliance_code, sn8,
-                )
-            except AuthError:
-                raise  # bubble up for re-auth
-            except Exception as err:
-                schedule = cached.get("schedule") or []
-                _LOGGER.debug("Daily schedule query failed, using cache: %s", err)
-        else:
-            schedule = cached.get("schedule") or []
-
-        # Disinfection settings live in the same 02,58 frame as the daily
-        # schedule (see query_disinfection).
+        # Daily schedule + Disinfection settings share the same 02,58 frame,
+        # fetched with ONE command that decodes both (see
+        # ILetComfortClient.query_schedule_and_disinfection) — no gating
+        # needed now that this doesn't cost an extra call: a failure here
+        # stays at DEBUG and never trips the offline Repair card or a
+        # cache-fallback WARNING; only the Aquapura Split Green actually has
+        # this frame (returns ``([], None)`` with no network call for every
+        # other profile).
         try:
-            disinfection = await self.hass.async_add_executor_job(
-                self.client.query_disinfection, self.appliance_code, sn8,
+            schedule, disinfection = await self.hass.async_add_executor_job(
+                self.client.query_schedule_and_disinfection, self.appliance_code, sn8,
             )
         except AuthError:
             raise  # bubble up for re-auth
         except Exception as err:
+            schedule = cached.get("schedule") or []
             disinfection = cached.get("disinfection")
-            _LOGGER.debug("Disinfection query failed, using cache: %s", err)
+            _LOGGER.debug("Schedule/disinfection query failed, using cache: %s", err)
 
-        # Heating element enable state lives in the TIMERS (01,90) frame.
+        # Heating element + Force Disinfection enable states share the same
+        # TIMERS (01,90) frame, fetched with ONE command that decodes both
+        # (see ILetComfortClient.query_timers).
         try:
-            heating_element = await self.hass.async_add_executor_job(
-                self.client.query_heating_element, self.appliance_code, sn8,
+            heating_element, force_disinfection = await self.hass.async_add_executor_job(
+                self.client.query_timers, self.appliance_code, sn8,
             )
         except AuthError:
             raise  # bubble up for re-auth
         except Exception as err:
             heating_element = cached.get("heating_element")
-            _LOGGER.debug("Heating element query failed, using cache: %s", err)
-
-        # Force Disinfection enable state shares the TIMERS (01,90) frame
-        # with the heating element.
-        try:
-            force_disinfection = await self.hass.async_add_executor_job(
-                self.client.query_force_disinfection, self.appliance_code, sn8,
-            )
-        except AuthError:
-            raise  # bubble up for re-auth
-        except Exception as err:
             force_disinfection = cached.get("force_disinfection")
-            _LOGGER.debug("Force Disinfection query failed, using cache: %s", err)
+            _LOGGER.debug("Timers query failed, using cache: %s", err)
 
         # Consumption page (day/week/month/year/total energy).
         try:
@@ -554,10 +512,6 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send a schedule-slot activate/deactivate SET command with auto
         re-auth, then refresh data.
 
-        Forces the next poll to refetch the daily schedule immediately,
-        bypassing CONFIG_FETCH_INTERVAL — otherwise a switch flipped here
-        could keep reading its pre-write state for up to 5 minutes.
-
         The device needs a moment after accepting the write before a
         subsequent query actually reflects it — refreshing immediately
         raced that and read back the pre-write value, making the switch
@@ -565,7 +519,10 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         (60s timer or another manual toggle) finally caught the real one.
         This mirrors the existing 2s pacing between the status and sensors
         queries in ``_poll()``, just applied here for the same reason:
-        giving the device time to settle before reading it back.
+        giving the device time to settle before reading it back. (The
+        schedule is refetched every poll now — see
+        ``query_schedule_and_disinfection`` — so there's no separate fetch
+        cadence left to force here, just the settle delay.)
         """
         try:
             await self.hass.async_add_executor_job(
@@ -578,5 +535,4 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 lambda: self.client.set_schedule_active(self.appliance_code, **kwargs)
             )
         await asyncio.sleep(SCHEDULE_WRITE_SETTLE_SECONDS)
-        self._last_config_fetch = None
         await self.async_request_refresh()

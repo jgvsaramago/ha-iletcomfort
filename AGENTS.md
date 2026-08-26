@@ -117,10 +117,12 @@ frames** and reads each data group from a **separate** frame:
 
 `build_aquapura_split_green_query(sel, param)` reproduces all eight captured commands byte-exact.
 `build_query_command` maps `0x01` → selector `01,f4` (STATUS) and `0x02` → `03,84` (**TANK TEMP — note it is
-under selector 0x03, not the standard sensors 0x02**). `02,58` (daily schedule) is fetched separately by
-`ILetComfortClient.query_daily_schedule`, gated to this profile (every other/unknown sn8 returns `[]` with
-no network call). Other selectors captured but unused: `00,00` identity, `00,64` config/limits, `01,90`
-timers/errors, `02,62` a *second*, differently-laid-out schedule frame, `03,e8` ODU sensors.
+under selector 0x03, not the standard sensors 0x02**). `02,58` (daily schedule + disinfection, they share
+one frame — see § below) is fetched separately by `ILetComfortClient.query_schedule_and_disinfection`,
+gated to this profile (every other/unknown sn8 returns `([], None)` with no network call). `01,90`
+(heating element + force disinfection, also sharing one frame) is likewise fetched by
+`ILetComfortClient.query_timers`. Other selectors captured but unused: `00,00` identity, `00,64`
+config/limits, `02,62` a *second*, differently-laid-out schedule frame, `03,e8` ODU sensors.
 
 Confirmed against **two** captures — A (tank 49 °C, ambient 21 °C) and B (tank 48 °C, ambient 20 °C),
 both unit OFF:
@@ -156,8 +158,9 @@ live app screenshot showing all 4 "Temporiz." slots (1 enabled, 3 disabled, all 
 8-byte block at `body[45 + n*8]` (`decode_aquapura_split_green_daily_schedule`,
 `AquapuraSplitGreenScheduleSlot`): `[active, mode_marker(0x40="Eco"), setpoint_hi, setpoint_lo, start_h,
 start_m, end_h, end_m]`. Disabled slots still carry their real setpoint/times — matches the app, which
-shows a disabled slot's config too. Fetched by a **separate, best-effort** poll
-(`ILetComfortCoordinator._poll` → `client.query_daily_schedule`), stored as `coordinator.data["schedule"]`
+shows a disabled slot's config too. Fetched by a **best-effort** poll (`ILetComfortCoordinator._poll` →
+`client.query_schedule_and_disinfection`, which also decodes disinfection from the same body — see the
+"repeated calls" note near the coordinator table below), stored as `coordinator.data["schedule"]`
 (a `list[AquapuraSplitGreenScheduleSlot]`, `[]` for every other profile — no network call). Surfaced as
 20 entities: `sensor.py` has `Daily Schedule {1..4} {Setpoint,Start Time,End Time,Mode}` (16), and
 `binary_sensor.py` has `Daily Schedule {1..4} Active` (4) — booleans went to `binary_sensor` per the
@@ -244,15 +247,15 @@ entry is padded with one extra `0x00` byte — **except the last field**, which 
 carries every field, a caller changing only `enabled` (the **Disinfection Routine** switch — named to
 leave room for a future one-off **Manual Disinfection** switch on the same device) must merge in the
 current hour/minute/temperature/cycle_days — it does NOT default them, since sending zeros would actually
-reset the device's real schedule. `api.py`'s `query_disinfection`/`set_disinfection` and
+reset the device's real schedule. `api.py`'s `query_schedule_and_disinfection`/`set_disinfection` and
 `coordinator.async_set_disinfection` implement this; the switch reads current values from
 `coordinator.data["disinfection"]` and raises rather than guessing if that's not populated yet. The
 hour/minute/temperature/cycle-days themselves are surfaced as separate `sensor.py` entities
 (`disinfection_temperature`, `disinfection_time` — "HH:MM" like the daily-schedule start/end times,
 `disinfection_cycle_days`), entity_category=DIAGNOSTIC like everything else here — not squeezed into the
-switch's attributes. Fetched unconditionally every poll (same as the daily schedule, whose 02,58 frame it
-shares) — costs one extra command per poll, on top of the tank/ODU sensors' own two commands, an accepted
-cost for this profile.
+switch's attributes. Fetched unconditionally every poll, in the SAME `02,58` command as the daily
+schedule — `query_schedule_and_disinfection` sends the selector once and decodes both from the one body,
+so this costs no extra command over the daily schedule alone (see "repeated calls" note below).
 
 **Heating element — confirmed, on the TIMERS (01,90) frame, not STATUS.** A real ON/OFF mitmproxy capture
 pair pins `body[54]` of the **01,90 frame** (previously "captured but unused" — see module notes above) as
@@ -266,16 +269,29 @@ number as silence's, but field ids are scoped per-selector, so it's unrelated:
     aa <len> c3 00×6 02 00 01 90 ff ff ff ff 01 ff ff 00 0e 01 <value> <cks>
 
 `build_aquapura_split_green_heating_element_command`/`decode_aquapura_split_green_heating_element` and
-`api.py`'s `query_heating_element`/`set_heating_element` implement this; surfaced as the **Heating
+`api.py`'s `query_timers`/`set_heating_element` implement this; surfaced as the **Heating
 Element** switch (`switch.py`), reading `coordinator.data["heating_element"]`, fetched unconditionally
-every poll like disinfection.
+every poll like disinfection — in the SAME `01,90` command as Force Disinfection below (see "repeated
+calls" note near the coordinator table).
 
 **Force Disinfection — confirmed, same TIMERS (01,90) frame as the heating element, different bit.** The
 app's manual/one-off counterpart to the scheduled Disinfection Routine. A real ON/OFF capture pair pins
 `body[55]` (`0x00`=Off, `0x01`=On) — `body[62]` moves again as the same noisy counter, nothing else. Write
 is field id `0x0f` on the same `01,90` selector (same shape as the heating element's, different field id
 and body index — the two are otherwise independent, just packed in the same frame). Surfaced as the
-**Force Disinfection** switch, reading `coordinator.data["force_disinfection"]`.
+**Force Disinfection** switch, reading `coordinator.data["force_disinfection"]`, decoded from the same
+`query_timers` call as the heating element (one command on the wire, two booleans decoded from the body).
+
+**Repeated-endpoint optimization.** `02,58` (daily schedule + disinfection) and `01,90` (heating element +
+force disinfection) were originally each queried **twice per poll** — once per feature, via four separate
+`api.py` methods — even though each pair decodes from the exact same response body. `api.py` now exposes
+`query_schedule_and_disinfection` and `query_timers`, each sending its selector **once** and decoding both
+targets from the one body; the coordinator calls these two combined methods instead of the original four.
+This is a pure win (same data, half the commands for these two groups) with no tradeoff, so it also let us
+delete the separate 5-minute schedule-refetch cadence that used to exist for the daily schedule alone
+(`CONFIG_FETCH_INTERVAL`/`self._last_config_fetch`, now removed): since disinfection already needs a fresh
+`02,58` fetch every 60s poll, schedule rides along on that same call for free and is now as fresh as
+everything else, at zero extra network cost.
 
 **Consumption (day/week/month/year/total energy) — confirmed, NEW selector `03,20`.** `body[12:32]` is 5
 consecutive 32-bit BE hundredths-of-kWh counters in this order: day, week, month, year, total. Confirmed
@@ -351,9 +367,12 @@ either.
    capture and fix the table**, don't rationalize the mismatch away.
 
    `build_aquapura_split_green_schedule_active_command`/`api.py`'s `set_schedule_active` implement this;
-   `coordinator.async_set_schedule_active` also resets `_last_config_fetch` to force an immediate schedule
-   refetch on the next poll (otherwise a slot the user just toggled could keep reading stale for up to
-   `CONFIG_FETCH_INTERVAL`). Surfaced as **switch.py**'s `ILetComfortDailyScheduleActiveSwitch` (one per
+   `coordinator.async_set_schedule_active` waits `SCHEDULE_WRITE_SETTLE_SECONDS` (3s, to let the device
+   commit the write before re-reading it — see the flicker note below) then forces an immediate refetch via
+   `async_request_refresh()`. The schedule itself has no separate refetch cadence any more — it's decoded
+   from the same `02,58` call as disinfection on every 60s poll (see the "repeated calls" note above), so
+   toggling a slot is never stale for longer than one normal poll interval. Surfaced as **switch.py**'s
+   `ILetComfortDailyScheduleActiveSwitch` (one per
    slot 1-4), which replaced the old read-only `binary_sensor.py` "Daily Schedule N Active" entities — now
    that it's a confirmed write, `entity_category=CONFIG` is the correct category (unlike the other
    daily-schedule fields, which stay DIAGNOSTIC sensors since they're still read-only — see §6). Editing a
@@ -417,7 +436,7 @@ forever in any existing install — the same class of bug the removed options-fl
 |------|----------------|
 | `api.py` | `ILetComfortClient` (login, `list_appliances`, `send_hex_command`, `query_status`/`query_sensors`); frame build/parse (`build_c3_query`, `build_c3_set`, `parse_hex_response`, `extract_c3_body`); decoders `decode_its_status`/`decode_its_sensors` + dataclasses `ITSStatus`/`ITSSensors`; `_temp_offset`; `AuthError`/`ApiError`. |
 | `model_profiles.py` | `ModelProfile` enum, `_SN8_PROFILES` table, `resolve_profile`, `decode_atw_status`, `apply_profile_to_status`, `apply_profile_to_sensors`. **Add new model support here.** |
-| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. Fixed `DEFAULT_SCAN_INTERVAL` (60s) poll cadence for status/sensors/disinfection/heating element/force disinfection/consumption — every fetch always runs, no user-facing config to disable any of them. The one exception: the daily schedule is refetched only once per `CONFIG_FETCH_INTERVAL` (5 min), tracked via `self._last_config_fetch`, since a user's timer config changes far less often than everything else polled — see `_poll()`. |
+| `coordinator.py` | `ILetComfortCoordinator`: polling, re-auth, cache-fallback, offline Repair card. Caches `appliance_meta` (best-effort, never fatal) and exposes `sn8`; threads profile into decode. Fixed `DEFAULT_SCAN_INTERVAL` (60s) poll cadence for status/sensors/schedule/disinfection/heating element/force disinfection/consumption — every fetch always runs, no user-facing config to disable any of them. Schedule+disinfection and heating-element+force-disinfection are each fetched with ONE combined call (`client.query_schedule_and_disinfection`, `client.query_timers`) since each pair decodes from the same response body — see the "repeated calls" note above — so there is no separate cadence for any of them any more. |
 | `diagnostics.py` | Redacted snapshot: raw frames, decoded status/sensors, `sensors_temperature_scan` (per-byte `_temp_offset` map — use it to find a model's misplaced temp byte), and the `appliance` metadata block. `APPLIANCE_TO_REDACT = {owner, sn, name}` (keeps `applianceType`/`modelNumber`/`sn8`). |
 | `climate.py` / `sensor.py` / `binary_sensor.py` / `switch.py` / `select.py` | HA entities. See §4 for which field backs which entity. |
 | `config_flow.py` / `__init__.py` / `const.py` / `entity.py` | Setup, entry, constants, base entity. No options flow — the integration has zero user-configurable settings by design (see the note below). |
