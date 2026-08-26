@@ -62,6 +62,7 @@ from custom_components.iletcomfort.model_profiles import (
     decode_aquapura_split_green_disinfection,
     decode_aquapura_split_green_force_disinfection,
     decode_aquapura_split_green_heating_element,
+    decode_aquapura_split_green_odu_serial,
     decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
     decode_aquapura_split_green_tank_temp,
@@ -1016,6 +1017,54 @@ def test_aquapura_split_green_ambient_temp_missing_frame_is_none():
     assert decode_aquapura_split_green_ambient_temp(b"\xff" * 60) is None
 
 
+# Second real ODU (selector 0x03,0xe8) capture, unrelated poll (ambient 24.8
+# °C, from a later debug-log capture). Its body is 3 bytes LONGER than
+# AQUAPURA_SPLIT_GREEN_ODU_RAW's (an earlier count-like field reads 0x03
+# here vs 0x02 there) which shifts everything after it, including the ODU
+# serial number, by 3 bytes -- this is exactly why the serial is decoded by
+# scanning for the ASCII run, not a fixed byte offset (see
+# decode_aquapura_split_green_odu_serial's module notes).
+AQUAPURA_SPLIT_GREEN_ODU_RAW_2 = _bytes(
+    "aa,eb,c3,00,00,00,00,00,00,03,00,03,e8,ff,ff,83,ff,00,ff,ff,ff,0f,ff,"
+    "ff,00,00,00,00,ff,01,e0,ff,ff,ff,ff,00,00,00,00,ff,ff,00,e7,ff,ff,ff,"
+    "ff,00,00,ff,ff,ff,ff,01,6b,01,35,01,01,00,f8,ff,ff,ff,ff,ff,ff,7f,ff,"
+    "7f,ff,7f,ff,ff,ff,ff,ff,ff,ff,00,00,ff,ff,ff,ff,ff,ff,00,32,00,64,7f,"
+    "ff,00,00,00,00,01,e9,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,"
+    "00,00,00,03,00,00,00,03,00,00,00,01,ff,ff,ff,ff,00,ff,ff,ff,00,00,00,"
+    "00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,"
+    "00,00,00,00,00,00,00,00,00,35,34,30,4e,41,38,37,30,31,30,31,42,34,31,"
+    "34,30,33,30,30,33,37,33,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,"
+    "00,00,00,00,00,00,00,00,00,00,00,56,31,30,00,00,00,00,00,00,00,00,00,"
+    "00,00,00,00,ff,ff,00,00,e6"
+)
+AQUAPURA_SPLIT_GREEN_ODU_BODY_2 = AQUAPURA_SPLIT_GREEN_ODU_RAW_2[10:-1]
+
+
+def test_aquapura_split_green_odu_serial_from_real_captures():
+    """The ODU serial number decodes to the app's exact "ODU SN" string from
+    BOTH real captures, even though it sits at a DIFFERENT byte offset in
+    each (157 vs 154) -- proof the scan-based decode (not a fixed index) is
+    the right approach, since a hardcoded offset would misread one of them.
+    """
+    assert len(AQUAPURA_SPLIT_GREEN_ODU_BODY) != len(AQUAPURA_SPLIT_GREEN_ODU_BODY_2)
+    assert (
+        decode_aquapura_split_green_odu_serial(AQUAPURA_SPLIT_GREEN_ODU_BODY)
+        == "540NA870101B4140300373"
+    )
+    assert (
+        decode_aquapura_split_green_odu_serial(AQUAPURA_SPLIT_GREEN_ODU_BODY_2)
+        == "540NA870101B4140300373"
+    )
+
+
+def test_aquapura_split_green_odu_serial_missing_frame_is_none():
+    """No ODU frame, or no run long enough to be a serial → None, not a crash."""
+    assert decode_aquapura_split_green_odu_serial(None) is None
+    assert decode_aquapura_split_green_odu_serial(b"") is None
+    assert decode_aquapura_split_green_odu_serial(b"\xff" * 60) is None
+    assert decode_aquapura_split_green_odu_serial(b"ABC123") is None  # too short
+
+
 def test_aquapura_split_green_tank_temp_absent_or_implausible_is_none():
     """0x7fff (sensor absent), padding and short frames all decode to None."""
     absent = _aquapura_split_green_tank_frame(0x7FFF)[10:-1]
@@ -1037,6 +1086,7 @@ def test_aquapura_split_green_sensors_merge_tank_and_odu():
 
     assert out.th_temp == 48.7
     assert out.t4_temp == 20.8
+    assert out.odu_serial == "540NA870101B4140300373"
     assert out.t3_temp is None
     assert out.t2_temp is None
     assert out.t2b_temp is None

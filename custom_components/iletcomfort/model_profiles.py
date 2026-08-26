@@ -475,6 +475,19 @@ _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
 AQUAPURA_SPLIT_GREEN_SETPOINT_INDEX = 15
 AQUAPURA_SPLIT_GREEN_TANK_TEMP_INDEX = 30
 AQUAPURA_SPLIT_GREEN_AMBIENT_TEMP_INDEX = 49
+# ODU (03,e8) frame carries the outdoor unit serial number as ASCII text
+# (confirmed by an exact character-for-character match against the app's
+# "More" page "ODU SN" field, "540NA870101B4140300373", in TWO real
+# captures) — but NOT at a fixed byte offset: one capture had it at
+# body[157:179], the other at body[154:176], a 3-byte shift caused by some
+# earlier variable-length field unrelated to the serial (confirmed by diffing
+# the two full frames — an earlier byte pair reads 0x02/0x02 vs 0x03/0x03,
+# some other count-like field, not the serial itself). So this is decoded by
+# scanning for the run, not a hardcoded index — see
+# decode_aquapura_split_green_odu_serial. A trailing "V10"-like tag sits
+# right after the serial in both captures but has no confirmed on-screen
+# label to match against, so it's left unmapped rather than guessed at.
+AQUAPURA_SPLIT_GREEN_ODU_SERIAL_MIN_LENGTH = 15
 # STATUS body[13] = power: 0x00 Off, non-zero On (confirmed by diffing a real
 # ON/OFF capture pair — see module notes). Reported mode 1/"Heat" matches the
 # KJRH-120L convention: query mode 1 -> HVACMode.HEAT in climate.py.
@@ -879,6 +892,44 @@ def decode_aquapura_split_green_ambient_temp(
     )
 
 
+def decode_aquapura_split_green_odu_serial(
+    body: bytearray | bytes | None,
+) -> str | None:
+    """Return the outdoor unit serial number from a Split Green ODU
+    (0x03,0xe8) frame.
+
+    Found by scanning for the longest run of ASCII digits/uppercase letters
+    at least AQUAPURA_SPLIT_GREEN_ODU_SERIAL_MIN_LENGTH long, rather than a
+    fixed byte offset — the frame's own layout shifts the serial's position
+    by a few bytes between real captures (see the module notes), so a fixed
+    index would misread it in some captures. None when no such run exists
+    (frame missing, too short, or the field isn't populated).
+    """
+    if not body:
+        return None
+
+    def _is_upper_alnum(byte: int) -> bool:
+        return 0x30 <= byte <= 0x39 or 0x41 <= byte <= 0x5A
+
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, byte in enumerate(body):
+        if _is_upper_alnum(byte):
+            if start is None:
+                start = i
+        elif start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(body)))
+
+    candidates = [r for r in runs if r[1] - r[0] >= AQUAPURA_SPLIT_GREEN_ODU_SERIAL_MIN_LENGTH]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda r: r[1] - r[0])
+    return bytes(body[best[0]:best[1]]).decode("ascii", errors="replace")
+
+
 def decode_aquapura_split_green_sensors(
     tank_body: bytearray | bytes,
     odu_body: bytearray | bytes | None = None,
@@ -899,6 +950,7 @@ def decode_aquapura_split_green_sensors(
     fields: dict[str, Any] = dict(_AQUAPURA_SPLIT_GREEN_SUPPRESSED_TEMPS)
     fields["th_temp"] = decode_aquapura_split_green_tank_temp(tank_body)
     fields["t4_temp"] = decode_aquapura_split_green_ambient_temp(odu_body)
+    fields["odu_serial"] = decode_aquapura_split_green_odu_serial(odu_body)
     return dataclasses.replace(ITSSensors(raw_body=bytes(tank_body)), **fields)
 
 
@@ -1176,6 +1228,7 @@ __all__ = [
     "decode_aquapura_split_green_disinfection",
     "decode_aquapura_split_green_force_disinfection",
     "decode_aquapura_split_green_heating_element",
+    "decode_aquapura_split_green_odu_serial",
     "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
     "decode_aquapura_split_green_tank_temp",

@@ -294,6 +294,16 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_s("odu_current"),
     ),
+    # Aquapura Split Green only: outdoor unit serial number, read as ASCII
+    # text from the ODU frame (confirmed by an exact match against the
+    # app's "More" page "ODU SN" field). None for every other profile.
+    ILetComfortSensorDescription(
+        key="odu_serial",
+        name="ODU Serial Number",
+        icon="mdi:barcode",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_s("odu_serial"),
+    ),
     # Daily-schedule entities represent the device's own timer configuration
     # (not live telemetry, not something watched day-to-day). entity_category
     # must be DIAGNOSTIC, not CONFIG: HA's SensorEntity/BinarySensorEntity

@@ -296,6 +296,28 @@ profile already used) rather than adding a redundant `consumption_total_energy` 
 `ITSStatus.total_kwh` was never decoded for this profile, so before this the primary-list "Total Energy"
 sensor silently read `0` for these devices.
 
+**ODU Serial Number — confirmed, from the ODU (`03,e8`) frame, but at a VARIABLE offset.** An exact
+character-for-character match against the app's "More" page "ODU SN" field (`540NA870101B4140300373`) in
+**two** real ODU captures taken at different times. The two captures disagree on where it sits — `body[157:179]`
+in one, `body[154:176]` in the other — a 3-byte shift caused by some earlier count-like field (`0x02` vs
+`0x03` a bit earlier in the frame) that has nothing to do with the serial itself. **`decode_aquapura_split_green_odu_serial`
+therefore scans for the longest run of ASCII digits/uppercase letters ≥ `AQUAPURA_SPLIT_GREEN_ODU_SERIAL_MIN_LENGTH`
+(15) instead of trusting a fixed byte offset** — a hardcoded index (the first instinct, and what got shipped
+initially before the second capture exposed the shift) would have silently misread one of the two real
+captures. A `V10`-like tag sits right after the serial in both captures but has no confirmed on-screen label,
+so it's left unmapped. Surfaced on `ITSSensors.odu_serial` and the **ODU Serial Number** `sensor.py` entity
+(DIAGNOSTIC, plain text, no device_class/unit).
+
+**Deliberately NOT added, despite plausible single-capture matches** (screen values the "More" page shows
+that a lone capture's bytes line up with, but with no before/after diff to rule out coincidence — see the
+CONSUMPTION frame's SmartGrid-percentage note above for the same caveat): "IHM SN" (no ASCII run matching it
+was found in any captured frame — it isn't in the `00,64`/`01,90`/`03,e8` frames we have; would need the
+`00,00` "identity" selector's response, never captured), and the `00,64` "config/limits" frame's Aquec. lig.
+(TrEH)/Água quente lig (Trdh) values (`10`°C/`5`°C) — several byte-pairs in that frame are plausible temperature
+encodings (e.g. `0x02bc`=70.0°C, matching the already-used `AQUAPURA_SPLIT_GREEN_TEMP_MAX` guess) but no single
+isolated byte unambiguously reads as `10` or `5` against a specific named field, so no entity was added for
+either.
+
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real
    setpoint moved), no confirmed meaning.

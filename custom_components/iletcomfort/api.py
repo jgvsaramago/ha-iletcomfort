@@ -424,6 +424,9 @@ class ITSSensors:
     tbh_total_run_hours: int = 0
     ahs_total_run_hours: int = 0
     hpc_value: int = 0
+    # Aquapura Split Green only: the outdoor unit serial number, read as
+    # ASCII text from the ODU frame. None for every other profile.
+    odu_serial: str | None = None
     raw_body: bytes = field(default_factory=bytes, repr=False)
 
 
