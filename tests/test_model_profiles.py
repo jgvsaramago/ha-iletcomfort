@@ -35,6 +35,7 @@ from custom_components.iletcomfort.model_profiles import (
     AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT,
     AQUAPURA_SPLIT_GREEN_SN8,
     ATW_SN8,
+    AquapuraSplitGreenConsumption,
     AquapuraSplitGreenDisinfectionSettings,
     AquapuraSplitGreenScheduleSlot,
     KJRH120L_DHW_OFF,
@@ -46,6 +47,7 @@ from custom_components.iletcomfort.model_profiles import (
     apply_profile_to_sensors,
     apply_profile_to_status,
     build_aquapura_split_green_disinfection_command,
+    build_aquapura_split_green_force_disinfection_command,
     build_aquapura_split_green_heating_element_command,
     build_aquapura_split_green_operating_mode_command,
     build_aquapura_split_green_power_command,
@@ -55,8 +57,10 @@ from custom_components.iletcomfort.model_profiles import (
     build_kjrh120l_set_temperature,
     build_query_command,
     decode_aquapura_split_green_ambient_temp,
+    decode_aquapura_split_green_consumption,
     decode_aquapura_split_green_daily_schedule,
     decode_aquapura_split_green_disinfection,
+    decode_aquapura_split_green_force_disinfection,
     decode_aquapura_split_green_heating_element,
     decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
@@ -512,7 +516,7 @@ def test_kjrh120l_sensors_temps_suppressed():
 # and read each data group from its own frame — hence the query-command tests
 # below as well as the decode tests.
 
-# The eight query commands captured from the app: (selector, param) → command.
+# The query commands captured from the app: (selector, param) → command.
 AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS = {
     (0x00, 0x00): "aa14c300000000000003000000ffffffff00ffff2c",  # identity
     (0x00, 0x64): "aa14c300000000000003000064ffffffff00ffffc8",  # config/limits
@@ -520,6 +524,7 @@ AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS = {
     (0x01, 0x90): "aa14c300000000000003000190ffffffff00ffff9b",  # timers/errors
     (0x02, 0x58): "aa14c300000000000003000258ffffffff00ffffd2",  # schedule A
     (0x02, 0x62): "aa14c300000000000003000262ffffffff00ffffc8",  # schedule B
+    (0x03, 0x20): "aa14c300000000000003000320ffffffff00ffff09",  # consumption
     (0x03, 0x84): "aa14c300000000000003000384ffffffff00ffffa5",  # TANK TEMP
     (0x03, 0xE8): "aa14c3000000000000030003e8ffffffff00ffff41",  # ODU sensors
 }
@@ -1625,6 +1630,168 @@ def test_set_heating_element_sends_captured_command():
         "APPL1", AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_COMMAND,
     )
     assert result["effective_enabled"] is True
+
+
+# Real "Force Disinfection" ON/OFF SET request + response pair, captured
+# toggling it in the app (mitmproxy). Same TIMERS (01,90) frame as the
+# heating element, body[55] instead of body[54].
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_COMMAND = (
+    "aa18c300000000000002000190ffffffff01ffff000f010186"
+)
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_COMMAND = (
+    "aa18c300000000000002000190ffffffff01ffff000f010087"
+)
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_RAW = _bytes(
+    "aa,52,c3,00,00,00,00,00,00,02,00,01,90,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,30,30,30,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,00,00,01,02,09,01,"
+    "6a,8f,48,f5,00,03,01,00,00,09,0f,00,00,c8"
+)
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_RAW = _bytes(
+    "aa,52,c3,00,00,00,00,00,00,02,00,01,90,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,30,30,30,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,00,00,00,02,09,01,"
+    "6a,8f,48,f7,00,03,01,00,00,09,0f,00,00,c7"
+)
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_BODY = (
+    AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_BODY = (
+    AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_RAW[10:-1]
+)
+
+
+def test_aquapura_split_green_force_disinfection_from_real_capture_pair():
+    """body[55] of the TIMERS (01,90) frame is confirmed as the Force
+    Disinfection toggle by a real ON/OFF capture pair.
+    """
+    on = decode_aquapura_split_green_force_disinfection(
+        AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_BODY,
+    )
+    off = decode_aquapura_split_green_force_disinfection(
+        AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_BODY,
+    )
+
+    assert AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_BODY[55] == 0x01
+    assert AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_BODY[55] == 0x00
+    assert on is True
+    assert off is False
+
+    # body[62] also differs (the same noisy counter as the heating element
+    # captures) -- confirm body[55] is still the only OTHER byte that changes.
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_BODY))
+        if AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_BODY[i]
+        and i != 62
+    ]
+    assert diffs == [55]
+
+
+def test_build_aquapura_split_green_force_disinfection_command_matches_captured_commands():
+    """Both captured Force Disinfection writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_force_disinfection_command(True)
+        == AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_force_disinfection_command(False)
+        == AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_OFF_COMMAND
+    )
+
+
+def test_query_force_disinfection_aquapura_split_green_sends_timers_frame():
+    """query_force_disinfection with the Split Green sn8 sends 01,90 and decodes it."""
+    client = _make_client()
+    with patch_send(
+        client, AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_RAW.hex(),
+    ) as send:
+        result = client.query_force_disinfection("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0x90)],
+    )
+    assert result is True
+
+
+def test_query_force_disinfection_other_profiles_send_no_command():
+    """Devices without this frame cost nothing: no command sent, None returned."""
+    client = _make_client()
+    with patch_send(client, "should never be used") as send:
+        assert client.query_force_disinfection("APPL1", sn8=None) is None
+        assert client.query_force_disinfection("APPL1", sn8=ATW_SN8) is None
+        assert client.query_force_disinfection("APPL1", sn8=KJRH120L_SN8) is None
+
+    send.assert_not_called()
+
+
+def test_set_force_disinfection_sends_captured_command():
+    """set_force_disinfection sends the real captured write command."""
+    client = _make_client()
+    with patch_send(
+        client, AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_RAW.hex(),
+    ) as send:
+        result = client.set_force_disinfection("APPL1", enabled=True)
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_ON_COMMAND,
+    )
+    assert result["effective_enabled"] is True
+
+
+# Real CONSUMPTION (selector 0x03,0x20) response frame, captured opening the
+# app's Consumption page. The screen showed day=1.12, week=month=year=
+# total=4.90 kWh -- matched byte-for-byte below.
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_RAW = _bytes(
+    "aa,81,c3,00,00,00,00,00,00,03,00,03,20,ff,ff,83,ff,00,ff,ff,ff,00,00,"
+    "00,00,70,00,00,01,ea,00,00,01,ea,00,00,01,ea,00,00,01,ea,00,00,01,e9,"
+    "00,00,00,00,00,00,01,e9,00,00,00,00,0a,07,ea,ff,ff,ff,ff,ff,ff,ff,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,"
+    "ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,ff,00,00,27,10,00,00,00,"
+    "00,00,00,00,00,04,31,00,00,00,00,00,00,f2"
+)
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_BODY = AQUAPURA_SPLIT_GREEN_CONSUMPTION_RAW[10:-1]
+
+
+def test_aquapura_split_green_consumption_matches_app_screenshot():
+    """day/week/month/year/total decode to exactly what the Consumption
+    page showed: day 1.12 kWh, the rest 4.90 kWh.
+    """
+    consumption = decode_aquapura_split_green_consumption(
+        AQUAPURA_SPLIT_GREEN_CONSUMPTION_BODY,
+    )
+    assert consumption == AquapuraSplitGreenConsumption(
+        day=1.12, week=4.90, month=4.90, year=4.90, total=4.90,
+    )
+
+
+def test_aquapura_split_green_consumption_short_frame_returns_none():
+    """A frame too short to carry all 5 counters decodes to None."""
+    assert decode_aquapura_split_green_consumption(bytes([0x00, 0x03, 0x20])) is None
+
+
+def test_query_consumption_aquapura_split_green_sends_consumption_frame():
+    """query_consumption with the Split Green sn8 sends 03,20 and decodes it."""
+    client = _make_client()
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_CONSUMPTION_RAW.hex()) as send:
+        result = client.query_consumption("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x03, 0x20)],
+    )
+    assert result == AquapuraSplitGreenConsumption(
+        day=1.12, week=4.90, month=4.90, year=4.90, total=4.90,
+    )
+
+
+def test_query_consumption_other_profiles_send_no_command():
+    """Devices without this frame cost nothing: no command sent, None returned."""
+    client = _make_client()
+    with patch_send(client, "should never be used") as send:
+        assert client.query_consumption("APPL1", sn8=None) is None
+        assert client.query_consumption("APPL1", sn8=ATW_SN8) is None
+        assert client.query_consumption("APPL1", sn8=KJRH120L_SN8) is None
+
+    send.assert_not_called()
 
 
 def test_aquapura_split_green_set_device_sends_captured_setpoint_command():

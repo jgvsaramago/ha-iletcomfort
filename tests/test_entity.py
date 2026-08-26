@@ -26,6 +26,7 @@ from custom_components.iletcomfort.const import (
 )
 from custom_components.iletcomfort.coordinator import ILetComfortCoordinator
 from custom_components.iletcomfort.model_profiles import (
+    AquapuraSplitGreenConsumption,
     AquapuraSplitGreenDisinfectionSettings,
     AquapuraSplitGreenScheduleSlot,
 )
@@ -38,6 +39,7 @@ from custom_components.iletcomfort.sensor import (
 from custom_components.iletcomfort.switch import (
     ILetComfortBoostSwitch,
     ILetComfortDisinfectionSwitch,
+    ILetComfortForceDisinfectionSwitch,
     ILetComfortHeatingElementSwitch,
     ILetComfortSilenceSwitch,
 )
@@ -80,6 +82,7 @@ def test_all_platforms_share_one_device(hass: HomeAssistant):
         ILetComfortSilenceSwitch(coord),
         ILetComfortDisinfectionSwitch(coord),
         ILetComfortHeatingElementSwitch(coord),
+        ILetComfortForceDisinfectionSwitch(coord),
         ILetComfortMuteSelect(coord),
     ]
 
@@ -223,6 +226,43 @@ def test_disinfection_sensors_none_without_disinfection_data(hass: HomeAssistant
     ):
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
         assert ILetComfortSensor(coord, desc).native_value is None
+
+
+def test_consumption_sensors_read_data(hass: HomeAssistant):
+    """Day/Week/Month/Year Energy read coordinator.data["consumption"]; Total
+    Energy prefers it over the generic status.total_kwh.
+    """
+    coord = _coordinator(hass)
+    coord.data["consumption"] = AquapuraSplitGreenConsumption(
+        day=1.12, week=4.90, month=4.90, year=4.90, total=4.90,
+    )
+
+    def _value(key: str):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        return ILetComfortSensor(coord, desc).native_value
+
+    assert _value("day_energy") == 1.12
+    assert _value("week_energy") == 4.90
+    assert _value("month_energy") == 4.90
+    assert _value("year_energy") == 4.90
+    assert _value("total_energy") == 4.90
+
+
+def test_consumption_sensors_none_without_consumption_data(hass: HomeAssistant):
+    """No consumption key (STANDARD/other profiles) → day/week/month/year read
+    None, and Total Energy falls back to the generic status.total_kwh.
+    """
+    coord = _coordinator(hass)
+    assert "consumption" not in coord.data
+    coord.data["status"] = ITSStatus(mode=1, total_kwh=42)
+
+    def _value(key: str):
+        desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == key)
+        return ILetComfortSensor(coord, desc).native_value
+
+    for key in ("day_energy", "week_energy", "month_energy", "year_energy"):
+        assert _value(key) is None
+    assert _value("total_energy") == 42
 
 
 def test_daily_schedule_sensors_none_without_schedule_data(hass: HomeAssistant):
@@ -376,6 +416,10 @@ async def test_full_integration_setup_adds_every_entity_without_error(
             enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
         )
         client.query_heating_element.return_value = True
+        client.query_force_disinfection.return_value = False
+        client.query_consumption.return_value = AquapuraSplitGreenConsumption(
+            day=1.12, week=4.90, month=4.90, year=4.90, total=4.90,
+        )
 
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -390,3 +434,5 @@ async def test_full_integration_setup_adds_every_entity_without_error(
     assert any(e.startswith("switch.") and "heating_element" in e for e in entity_ids)
     assert any("disinfection_temperature" in e for e in entity_ids)
     assert any(e.startswith("switch.") and "disinfection" in e for e in entity_ids)
+    assert any(e.startswith("switch.") and "force_disinfection" in e for e in entity_ids)
+    assert any("day_energy" in e for e in entity_ids)

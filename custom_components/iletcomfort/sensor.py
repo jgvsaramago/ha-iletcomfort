@@ -89,6 +89,29 @@ def _disinfection_time(data: dict[str, Any]) -> Any:
     return f"{settings.hour:02d}:{settings.minute:02d}"
 
 
+def _consumption(attr: str) -> Callable[[dict[str, Any]], Any]:
+    """Helper: get an attribute from the Aquapura Split Green Consumption
+    page data (day/week/month/year/total energy). None if there's no
+    consumption data for this device/poll (every other profile).
+    """
+    def _get(data: dict[str, Any]) -> Any:
+        consumption = data.get("consumption")
+        return getattr(consumption, attr, None) if consumption else None
+    return _get
+
+
+def _total_energy(data: dict[str, Any]) -> Any:
+    """Total energy: the Aquapura Split Green's Consumption-page total
+    (confirmed against a live capture) when available, else the generic
+    STATUS-frame total_kwh every other profile already populates.
+    """
+    consumption = data.get("consumption")
+    if consumption is not None:
+        return consumption.total
+    status = data.get("status")
+    return getattr(status, "total_kwh", None) if status else None
+
+
 SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
     ILetComfortSensorDescription(
         key="water_inlet",
@@ -178,7 +201,44 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=_st("total_kwh"),
+        value_fn=_total_energy,
+    ),
+    # Aquapura Split Green Consumption page: day/week/month/year are
+    # periodic (reset at the start of each period), so state_class is TOTAL,
+    # not TOTAL_INCREASING (reserved for a monotonic lifetime counter like
+    # total_energy above) -- HA's own guidance for a sensor that can go both
+    # up and down between updates.
+    ILetComfortSensorDescription(
+        key="day_energy",
+        name="Day Energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_consumption("day"),
+    ),
+    ILetComfortSensorDescription(
+        key="week_energy",
+        name="Week Energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_consumption("week"),
+    ),
+    ILetComfortSensorDescription(
+        key="month_energy",
+        name="Month Energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_consumption("month"),
+    ),
+    ILetComfortSensorDescription(
+        key="year_energy",
+        name="Year Energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        value_fn=_consumption("year"),
     ),
     ILetComfortSensorDescription(
         key="comp_run_hours",

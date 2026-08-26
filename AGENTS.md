@@ -270,16 +270,54 @@ number as silence's, but field ids are scoped per-selector, so it's unrelated:
 Element** switch (`switch.py`), reading `coordinator.data["heating_element"]`, fetched unconditionally
 every poll like disinfection.
 
+**Force Disinfection — confirmed, same TIMERS (01,90) frame as the heating element, different bit.** The
+app's manual/one-off counterpart to the scheduled Disinfection Routine. A real ON/OFF capture pair pins
+`body[55]` (`0x00`=Off, `0x01`=On) — `body[62]` moves again as the same noisy counter, nothing else. Write
+is field id `0x0f` on the same `01,90` selector (same shape as the heating element's, different field id
+and body index — the two are otherwise independent, just packed in the same frame). Surfaced as the
+**Force Disinfection** switch, reading `coordinator.data["force_disinfection"]`.
+
+**Consumption (day/week/month/year/total energy) — confirmed, NEW selector `03,20`.** `body[12:32]` is 5
+consecutive 32-bit BE hundredths-of-kWh counters in this order: day, week, month, year, total. Confirmed
+by matching a live capture against the app's Consumption page: day `0x70`=112→1.12 kWh, the rest
+`0x1ea`=490→4.90 kWh each — day being distinct from the other four (all equal, since the device was new)
+is what pins the field order, not a guess from position alone. `body[32:36]` (`0x1e9`=489, one hundredth
+below the day-adjacent totals) and the all-`0xff` block at `body[51:99]` (a 12-entry × 4-byte history
+chart, all "no data" sentinel — matches the app's empty "History data" section) are real but unlabeled and
+stay unmapped; so does `body[99:111]` (looks like 3 percentage-like values, possibly the SmartGrid
+grid/máx/green split shown on the same page — `0x2710`=10000→100.00% for the first, matching "100% grid" —
+but not confirmed against a capture that changes them). `decode_aquapura_split_green_consumption`/
+`AquapuraSplitGreenConsumption` and `api.py`'s `query_consumption` implement this — **read-only, no write
+captured or needed**. Surfaced as 4 new `sensor.py` entities (`day_energy`/`week_energy`/`month_energy`/
+`year_energy`, `state_class=TOTAL` since they reset each period, unlike a lifetime counter) plus folded
+into the existing **Total Energy** sensor (`_total_energy` value_fn: prefers `coordinator.data
+["consumption"].total` when present, falls back to the generic STATUS-frame `total_kwh` every other
+profile already used) rather than adding a redundant `consumption_total_energy` — Aquapura Split Green
+`ITSStatus.total_kwh` was never decoded for this profile, so before this the primary-list "Total Energy"
+sensor silently read `0` for these devices.
+
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real
    setpoint moved), no confirmed meaning.
 2. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
    to validate against — left unmapped rather than guessed. The TIMERS (01,90) frame's own `body[13:48]`
    (two 20-byte all-'0'/zero-padded blocks) is likewise real but unlabeled — possibly blank
-   timer/error-log strings — and stays unmapped.
+   timer/error-log strings — and stays unmapped. Same for the CONSUMPTION frame's `body[32:48]` and
+   `body[99:118]` — see above.
 3. Setpoint/power/mode **limits**: no app-confirmed min/max capture exists, so the climate entity reuses
    the KJRH-120L's validated DHW range (`AQUAPURA_SPLIT_GREEN_TEMP_MIN/MAX` = 20-70 °C) as a conservative
    bound — wide enough for the captured 50-52 °C values without guessing a tighter one.
+4. **Daily schedule writes (activate/deactivate a slot, edit its setpoint/start/end/mode) are NOT
+   captured.** The daily-schedule read (§ above) is fully decoded, but no mitmproxy capture exists of the
+   app actually writing a schedule-slot change — unlike Disinfection (also on `02,58`), where 5 real
+   before/after write captures exist. Do not guess a write frame for this: the field-id/byte-layout pattern
+   established by Disinfection's multi-field write is a plausible *shape* to expect, but guessing the actual
+   field ids/offsets for schedule slots without a capture risks silently corrupting a user's real timer
+   config. Needs the same capture methodology as Silence/Disinfection/Heating-Element before it can be
+   exposed as a writable entity (and only then would `entity_category=CONFIG` become valid for it — CONFIG
+   is fine for a domain that supports write actions, e.g. `switch`/`number`/`select`, but never for a plain
+   read-only `sensor`/`binary_sensor`, which is why the existing read-only Daily Schedule entities use
+   DIAGNOSTIC — see §6 above).
 
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
 - The real water/tank temp is in `status.box_bottom_temp` (status byte[17], offset-decoded → e.g. 40 °C).

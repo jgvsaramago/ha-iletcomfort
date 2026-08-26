@@ -900,6 +900,70 @@ class ILetComfortClient:
         response_hex = self.send_hex_command(appliance_code, command)
         return {"sent": command, "response": response_hex, "effective_enabled": enabled}
 
+    def query_force_disinfection(
+        self, appliance_code: str, sn8: str | None = None,
+    ) -> bool | None:
+        """Query the Aquapura Split Green's "Force Disinfection" (manual,
+        one-off) enable state.
+
+        Shares the TIMERS frame (01,90) with the heating element, fetched
+        with its own command rather than sharing that fetch's response,
+        mirroring how disinfection/schedule already cost two commands per
+        poll despite sharing a frame. Only the Aquapura Split Green (sn8
+        17186T3A) exposes this frame — every other/unknown sn8 returns None
+        without sending any command.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+            ModelProfile,
+            decode_aquapura_split_green_force_disinfection,
+            resolve_profile,
+        )
+
+        if resolve_profile(sn8) is not ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return None
+
+        body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+        )
+        return decode_aquapura_split_green_force_disinfection(body)
+
+    def set_force_disinfection(
+        self, appliance_code: str, *, enabled: bool,
+    ) -> dict[str, Any]:
+        """Send the Aquapura Split Green "Force Disinfection" ON/OFF write command."""
+        from .model_profiles import build_aquapura_split_green_force_disinfection_command
+
+        command = build_aquapura_split_green_force_disinfection_command(enabled)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {"sent": command, "response": response_hex, "effective_enabled": enabled}
+
+    def query_consumption(
+        self, appliance_code: str, sn8: str | None = None,
+    ) -> Any:
+        """Query the Aquapura Split Green's Consumption page energy totals
+        (day/week/month/year/total kWh).
+
+        Only the Aquapura Split Green (sn8 17186T3A) exposes this frame —
+        every other/unknown sn8 returns None without sending any command.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_CONSUMPTION_SELECTOR,
+            ModelProfile,
+            decode_aquapura_split_green_consumption,
+            resolve_profile,
+        )
+
+        if resolve_profile(sn8) is not ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return None
+
+        body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_CONSUMPTION_SELECTOR,
+        )
+        return decode_aquapura_split_green_consumption(body)
+
     def _query_aquapura_split_green_frame(
         self, appliance_code: str, selector: tuple[int, int],
     ) -> bytearray:

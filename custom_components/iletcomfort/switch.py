@@ -28,6 +28,7 @@ async def async_setup_entry(
         ILetComfortSilenceSwitch(coordinator),
         ILetComfortDisinfectionSwitch(coordinator),
         ILetComfortHeatingElementSwitch(coordinator),
+        ILetComfortForceDisinfectionSwitch(coordinator),
     ])
 
 
@@ -96,9 +97,9 @@ class ILetComfortDisinfectionSwitch(
 ):
     """Switch entity for the Aquapura Split Green's "Desinfecção" (disinfection) mode.
 
-    Named "Disinfection Routine" (not just "Disinfection") since a future
-    "Manual Disinfection" switch will trigger a one-off cycle on the same
-    device — this one is the scheduled routine (enable + hour/minute/
+    Named "Disinfection Routine" (not just "Disinfection") since
+    ``ILetComfortForceDisinfectionSwitch`` triggers a one-off cycle on the
+    same device — this one is the scheduled routine (enable + hour/minute/
     temperature/cycle-days), matching what the app's Desinfecção submenu
     shows. Declared unconditionally like the other switches; every other
     profile never populates ``coordinator.data["disinfection"]``, so this
@@ -184,3 +185,36 @@ class ILetComfortHeatingElementSwitch(
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_heating_element(enabled=False)
+
+
+class ILetComfortForceDisinfectionSwitch(
+    CoordinatorEntity[ILetComfortCoordinator], SwitchEntity,
+):
+    """Switch entity for the Aquapura Split Green's "Force Disinfection"
+    (manual, one-off) cycle — the app's counterpart to the scheduled
+    **Disinfection Routine** switch, on the same TIMERS (01,90) frame as the
+    heating element (different field/body index). Only that profile's
+    coordinator data ever populates ``coordinator.data["force_disinfection"]``;
+    every other profile leaves it None, so this reads "off" for them.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Force Disinfection"
+    _attr_icon = "mdi:bacteria"
+
+    def __init__(self, coordinator: ILetComfortCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.appliance_code}_force_disinfection"
+        self._attr_device_info = build_device_info(coordinator)
+
+    @property
+    def is_on(self) -> bool:
+        if self.coordinator.data is None:
+            return False
+        return bool(self.coordinator.data.get("force_disinfection"))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_force_disinfection(enabled=True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_force_disinfection(enabled=False)

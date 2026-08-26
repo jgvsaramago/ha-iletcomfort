@@ -295,6 +295,29 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             heating_element = cached.get("heating_element")
             _LOGGER.debug("Heating element query failed, using cache: %s", err)
 
+        # Force Disinfection enable state shares the TIMERS (01,90) frame
+        # with the heating element.
+        try:
+            force_disinfection = await self.hass.async_add_executor_job(
+                self.client.query_force_disinfection, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            force_disinfection = cached.get("force_disinfection")
+            _LOGGER.debug("Force Disinfection query failed, using cache: %s", err)
+
+        # Consumption page (day/week/month/year/total energy).
+        try:
+            consumption = await self.hass.async_add_executor_job(
+                self.client.query_consumption, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            consumption = cached.get("consumption")
+            _LOGGER.debug("Consumption query failed, using cache: %s", err)
+
         self._update_offline_repair()
 
         return {
@@ -303,6 +326,8 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "schedule": schedule,
             "disinfection": disinfection,
             "heating_element": heating_element,
+            "force_disinfection": force_disinfection,
+            "consumption": consumption,
         }
 
     def _update_offline_repair(self) -> None:
@@ -473,5 +498,19 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._async_login()
             await self.hass.async_add_executor_job(
                 lambda: self.client.set_heating_element(self.appliance_code, **kwargs)
+            )
+        await self.async_request_refresh()
+
+    async def async_set_force_disinfection(self, **kwargs: Any) -> None:
+        """Send a Force Disinfection SET command with auto re-auth, then refresh data."""
+        try:
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_force_disinfection(self.appliance_code, **kwargs)
+            )
+        except AuthError:
+            _LOGGER.info("Auth error during set, re-authenticating")
+            await self._async_login()
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_force_disinfection(self.appliance_code, **kwargs)
             )
         await self.async_request_refresh()

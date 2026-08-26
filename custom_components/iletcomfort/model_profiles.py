@@ -460,6 +460,8 @@ AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR = (0x02, 0x58)
 # "Timers/errors" frame (previously captured but unmapped — see module
 # notes). Now known to also carry the heating element enable bit.
 AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR = (0x01, 0x90)
+# "Consumption" page frame — day/week/month/year/total energy.
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_SELECTOR = (0x03, 0x20)
 
 # Which selector serves each of the integration's two polled subtypes.
 _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
@@ -493,6 +495,24 @@ AQUAPURA_SPLIT_GREEN_SILENCE_INDEX = 17
 # byte that moved, body[62], is a monotonically increasing counter unrelated
 # to the toggle — see module notes). NOT a STATUS-frame index.
 AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX = 54
+# TIMERS (01,90) frame body[55] = the "Force Disinfection" (manual, one-off)
+# toggle: 0x00 Off, 0x01 On (confirmed the same way — body[62] again moved as
+# the same noisy counter, nothing else).
+AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_INDEX = 55
+
+# CONSUMPTION (03,20) frame body[12:32] = 5 consecutive 32-bit BE
+# hundredths-of-kWh counters: day, week, month, year, total (confirmed by
+# matching a live capture against the app's Consumption page: day=0x70=112
+# ->1.12 kWh, week/month/year/total all 0x1ea=490 ->4.90 kWh, matching the
+# screen exactly, day being distinct from the rest is what pins the field
+# order). The 4 bytes right after (body[32:36], 0x1e9=489) and the all-0xff
+# block from body[51:99] (yearly/monthly history chart, empty) are real data
+# with no confirmed per-field meaning and are left unmapped.
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_DAY_INDEX = 12
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_WEEK_INDEX = 16
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_MONTH_INDEX = 20
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_YEAR_INDEX = 24
+AQUAPURA_SPLIT_GREEN_CONSUMPTION_TOTAL_INDEX = 28
 
 # Setpoint range the climate entity clamps to for this profile. No app-
 # confirmed limit capture exists yet; this reuses the KJRH-120L's validated
@@ -507,9 +527,11 @@ AQUAPURA_SPLIT_GREEN_FIELD_POWER = 0x0B
 AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE = 0x0C
 AQUAPURA_SPLIT_GREEN_FIELD_SETPOINT = 0x0D
 AQUAPURA_SPLIT_GREEN_FIELD_SILENCE = 0x0E
-# Heating element field id — on the TIMERS selector (01,90), not STATUS;
-# field ids are scoped per-selector, so this 0x0E is unrelated to silence's.
+# Heating element / Force Disinfection field ids — both on the TIMERS
+# selector (01,90), not STATUS; field ids are scoped per-selector, so
+# 0x0E is unrelated to silence's.
 AQUAPURA_SPLIT_GREEN_FIELD_HEATING_ELEMENT = 0x0E
+AQUAPURA_SPLIT_GREEN_FIELD_FORCE_DISINFECTION = 0x0F
 
 # Operating-mode marker byte -> app label, shared by the live STATUS frame
 # (body[14]) and a daily-schedule slot's mode byte (slot offset +1) — both
@@ -743,6 +765,69 @@ def decode_aquapura_split_green_heating_element(
     if len(body) <= AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX:
         return None
     return body[AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX] != 0
+
+
+def build_aquapura_split_green_force_disinfection_command(enabled: bool) -> str:
+    """Return the Aquapura Split Green "Force Disinfection" (manual, one-off)
+    ON/OFF write command. Same TIMERS selector (01,90) as the heating
+    element, different field id. Captured toggling it in the app
+    (mitmproxy); reproduces both captures byte-exact:
+    ``build_aquapura_split_green_force_disinfection_command(True)``  ->
+      ``aa18c300000000000002000190ffffffff01ffff000f010186``
+    ``build_aquapura_split_green_force_disinfection_command(False)`` ->
+      ``aa18c300000000000002000190ffffffff01ffff000f010087``
+    """
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_FORCE_DISINFECTION,
+        bytes([0x01 if enabled else 0x00]),
+        selector=AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+    )
+
+
+def decode_aquapura_split_green_force_disinfection(
+    body: bytearray | bytes,
+) -> bool | None:
+    """Decode the "Force Disinfection" enable bit from a Split Green 01,90 frame.
+
+    None if the frame is too short to carry it.
+    """
+    if len(body) <= AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_INDEX:
+        return None
+    return body[AQUAPURA_SPLIT_GREEN_FORCE_DISINFECTION_INDEX] != 0
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class AquapuraSplitGreenConsumption:
+    """Aquapura Split Green "Consumption" page energy totals, all kWh."""
+
+    day: float = 0.0
+    week: float = 0.0
+    month: float = 0.0
+    year: float = 0.0
+    total: float = 0.0
+
+
+def decode_aquapura_split_green_consumption(
+    body: bytearray | bytes,
+) -> AquapuraSplitGreenConsumption | None:
+    """Decode day/week/month/year/total energy from a Split Green 03,20 frame.
+
+    None if the frame is too short to carry them.
+    """
+    if len(body) <= AQUAPURA_SPLIT_GREEN_CONSUMPTION_TOTAL_INDEX + 3:
+        return None
+
+    def _u32(index: int) -> float:
+        raw = int.from_bytes(body[index:index + 4], "big")
+        return raw / 100
+
+    return AquapuraSplitGreenConsumption(
+        day=_u32(AQUAPURA_SPLIT_GREEN_CONSUMPTION_DAY_INDEX),
+        week=_u32(AQUAPURA_SPLIT_GREEN_CONSUMPTION_WEEK_INDEX),
+        month=_u32(AQUAPURA_SPLIT_GREEN_CONSUMPTION_MONTH_INDEX),
+        year=_u32(AQUAPURA_SPLIT_GREEN_CONSUMPTION_YEAR_INDEX),
+        total=_u32(AQUAPURA_SPLIT_GREEN_CONSUMPTION_TOTAL_INDEX),
+    )
 
 
 def build_aquapura_split_green_setpoint_command(temp_c: float) -> str:
@@ -1054,6 +1139,7 @@ def apply_profile_to_sensors(
 __all__ = [
     "AQUAPURA_SN8",
     "ATW_SN8",
+    "AQUAPURA_SPLIT_GREEN_CONSUMPTION_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_ODU_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_SCHEDULE_SLOT_COUNT",
@@ -1063,6 +1149,7 @@ __all__ = [
     "AQUAPURA_SPLIT_GREEN_TEMP_MAX",
     "AQUAPURA_SPLIT_GREEN_TEMP_MIN",
     "AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR",
+    "AquapuraSplitGreenConsumption",
     "AquapuraSplitGreenDisinfectionSettings",
     "AquapuraSplitGreenScheduleSlot",
     "KJRH120L_DHW_OFF",
@@ -1076,6 +1163,7 @@ __all__ = [
     "build_aquapura_split_green_operating_mode_command",
     "build_aquapura_split_green_power_command",
     "build_aquapura_split_green_disinfection_command",
+    "build_aquapura_split_green_force_disinfection_command",
     "build_aquapura_split_green_heating_element_command",
     "build_aquapura_split_green_query",
     "build_aquapura_split_green_setpoint_command",
@@ -1083,8 +1171,10 @@ __all__ = [
     "build_kjrh120l_set_temperature",
     "build_query_command",
     "decode_aquapura_split_green_ambient_temp",
+    "decode_aquapura_split_green_consumption",
     "decode_aquapura_split_green_daily_schedule",
     "decode_aquapura_split_green_disinfection",
+    "decode_aquapura_split_green_force_disinfection",
     "decode_aquapura_split_green_heating_element",
     "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
