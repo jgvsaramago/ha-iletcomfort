@@ -284,6 +284,17 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             disinfection = cached.get("disinfection")
             _LOGGER.debug("Disinfection query failed, using cache: %s", err)
 
+        # Heating element enable state lives in the TIMERS (01,90) frame.
+        try:
+            heating_element = await self.hass.async_add_executor_job(
+                self.client.query_heating_element, self.appliance_code, sn8,
+            )
+        except AuthError:
+            raise  # bubble up for re-auth
+        except Exception as err:
+            heating_element = cached.get("heating_element")
+            _LOGGER.debug("Heating element query failed, using cache: %s", err)
+
         self._update_offline_repair()
 
         return {
@@ -291,6 +302,7 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "sensors": sensors,
             "schedule": schedule,
             "disinfection": disinfection,
+            "heating_element": heating_element,
         }
 
     def _update_offline_repair(self) -> None:
@@ -447,5 +459,19 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._async_login()
             await self.hass.async_add_executor_job(
                 lambda: self.client.set_disinfection(self.appliance_code, **kwargs)
+            )
+        await self.async_request_refresh()
+
+    async def async_set_heating_element(self, **kwargs: Any) -> None:
+        """Send a heating-element SET command with auto re-auth, then refresh data."""
+        try:
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_heating_element(self.appliance_code, **kwargs)
+            )
+        except AuthError:
+            _LOGGER.info("Auth error during set, re-authenticating")
+            await self._async_login()
+            await self.hass.async_add_executor_job(
+                lambda: self.client.set_heating_element(self.appliance_code, **kwargs)
             )
         await self.async_request_refresh()

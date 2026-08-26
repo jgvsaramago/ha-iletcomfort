@@ -46,6 +46,7 @@ from custom_components.iletcomfort.model_profiles import (
     apply_profile_to_sensors,
     apply_profile_to_status,
     build_aquapura_split_green_disinfection_command,
+    build_aquapura_split_green_heating_element_command,
     build_aquapura_split_green_operating_mode_command,
     build_aquapura_split_green_power_command,
     build_aquapura_split_green_query,
@@ -56,6 +57,7 @@ from custom_components.iletcomfort.model_profiles import (
     decode_aquapura_split_green_ambient_temp,
     decode_aquapura_split_green_daily_schedule,
     decode_aquapura_split_green_disinfection,
+    decode_aquapura_split_green_heating_element,
     decode_aquapura_split_green_sensors,
     decode_aquapura_split_green_status,
     decode_aquapura_split_green_tank_temp,
@@ -1509,6 +1511,118 @@ def test_set_disinfection_sends_captured_command():
         )
     send.assert_called_once_with(
         "APPL1", AQUAPURA_SPLIT_GREEN_DISINFECTION_ON_COMMAND,
+    )
+    assert result["effective_enabled"] is True
+
+
+# Real heating-element ON/OFF SET request + response pair, captured toggling
+# it in the app (mitmproxy). Lives in the TIMERS (01,90) frame -- a different
+# selector from every other single-field write (all on STATUS, 01,f4).
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_COMMAND = (
+    "aa18c300000000000002000190ffffffff01ffff000e010187"
+)
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_COMMAND = (
+    "aa18c300000000000002000190ffffffff01ffff000e010088"
+)
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_RAW = _bytes(
+    "aa,52,c3,00,00,00,00,00,00,02,00,01,90,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,30,30,30,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,00,01,00,02,09,01,"
+    "6a,8f,3d,84,00,03,01,00,00,09,0f,00,00,44"
+)
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_RAW = _bytes(
+    "aa,52,c3,00,00,00,00,00,00,02,00,01,90,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,30,30,30,"
+    "30,30,30,30,30,30,30,30,30,30,30,30,00,00,00,00,00,00,00,00,02,09,01,"
+    "6a,8f,3d,96,00,03,01,00,00,09,0f,00,00,33"
+)
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_BODY = (
+    AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_RAW[10:-1]
+)
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_BODY = (
+    AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_RAW[10:-1]
+)
+
+
+def test_aquapura_split_green_heating_element_from_real_capture_pair():
+    """body[54] of the TIMERS (01,90) frame is confirmed as the heating
+    element toggle by a real ON/OFF capture pair.
+    """
+    on = decode_aquapura_split_green_heating_element(
+        AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_BODY,
+    )
+    off = decode_aquapura_split_green_heating_element(
+        AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_BODY,
+    )
+
+    assert AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_BODY[54] == 0x01
+    assert AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_BODY[54] == 0x00
+    assert on is True
+    assert off is False
+
+    # body[62] also differs between the two captures (a monotonically
+    # increasing counter, unrelated to the toggle) -- confirm body[54] is
+    # still the only byte that changes when that known-noisy byte is excluded.
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_BODY))
+        if AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_BODY[i]
+        and i != 62
+    ]
+    assert diffs == [54]
+
+
+def test_aquapura_split_green_heating_element_short_frame_returns_none():
+    """A frame too short to carry the heating element bit decodes to None."""
+    assert decode_aquapura_split_green_heating_element(bytes([0x00, 0x01, 0x90])) is None
+
+
+def test_build_aquapura_split_green_heating_element_command_matches_captured_commands():
+    """Both captured heating-element writes are reproduced byte-exact."""
+    assert (
+        build_aquapura_split_green_heating_element_command(True)
+        == AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_heating_element_command(False)
+        == AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_OFF_COMMAND
+    )
+
+
+def test_query_heating_element_aquapura_split_green_sends_timers_frame():
+    """query_heating_element with the Split Green sn8 sends 01,90 and decodes it."""
+    client = _make_client()
+    with patch_send(
+        client, AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_RAW.hex(),
+    ) as send:
+        result = client.query_heating_element("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8)
+
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS[(0x01, 0x90)],
+    )
+    assert result is True
+
+
+def test_query_heating_element_other_profiles_send_no_command():
+    """Devices without this frame cost nothing: no command sent, None returned."""
+    client = _make_client()
+    with patch_send(client, "should never be used") as send:
+        assert client.query_heating_element("APPL1", sn8=None) is None
+        assert client.query_heating_element("APPL1", sn8=ATW_SN8) is None
+        assert client.query_heating_element("APPL1", sn8=KJRH120L_SN8) is None
+
+    send.assert_not_called()
+
+
+def test_set_heating_element_sends_captured_command():
+    """set_heating_element sends the real captured write command."""
+    client = _make_client()
+    with patch_send(
+        client, AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_RAW.hex(),
+    ) as send:
+        result = client.set_heating_element("APPL1", enabled=True)
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_ON_COMMAND,
     )
     assert result["effective_enabled"] is True
 

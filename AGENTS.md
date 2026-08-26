@@ -254,11 +254,29 @@ switch's attributes. Fetched unconditionally every poll (same as the daily sched
 shares) — costs one extra command per poll, on top of the tank/ODU sensors' own two commands, an accepted
 cost for this profile.
 
+**Heating element — confirmed, on the TIMERS (01,90) frame, not STATUS.** A real ON/OFF mitmproxy capture
+pair pins `body[54]` of the **01,90 frame** (previously "captured but unused" — see module notes above) as
+the toggle (`0x00`=Off, `0x01`=On). `body[62]` also moves between the two captures (`0x84`→`0x96`, +18) but
+is a monotonically increasing counter, not part of the toggle — confirmed by checking it's the *only other*
+byte that changes, and it changes by a small amount consistent with elapsed seconds between the two
+captures, not a semantically meaningful state flip. The **write** reuses the single-field shape (see the
+field table above) but on selector `01,90` instead of `01,f4`, with field id `0x0e` — the SAME field id
+number as silence's, but field ids are scoped per-selector, so it's unrelated:
+
+    aa <len> c3 00×6 02 00 01 90 ff ff ff ff 01 ff ff 00 0e 01 <value> <cks>
+
+`build_aquapura_split_green_heating_element_command`/`decode_aquapura_split_green_heating_element` and
+`api.py`'s `query_heating_element`/`set_heating_element` implement this; surfaced as the **Heating
+Element** switch (`switch.py`), reading `coordinator.data["heating_element"]`, fetched unconditionally
+every poll like disinfection.
+
 **Still not decoded / not writable:**
 1. body[27]: real data (constant `0x32` across every capture so far, including ones where the real
    setpoint moved), no confirmed meaning.
 2. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
-   to validate against — left unmapped rather than guessed.
+   to validate against — left unmapped rather than guessed. The TIMERS (01,90) frame's own `body[13:48]`
+   (two 20-byte all-'0'/zero-padded blocks) is likewise real but unlabeled — possibly blank
+   timer/error-log strings — and stays unmapped.
 3. Setpoint/power/mode **limits**: no app-confirmed min/max capture exists, so the climate entity reuses
    the KJRH-120L's validated DHW range (`AQUAPURA_SPLIT_GREEN_TEMP_MIN/MAX` = 20-70 °C) as a conservative
    bound — wide enough for the captured 50-52 °C values without guessing a tighter one.

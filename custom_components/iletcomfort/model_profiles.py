@@ -457,6 +457,9 @@ AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR = (0x01, 0xF4)
 AQUAPURA_SPLIT_GREEN_TANK_SELECTOR = (0x03, 0x84)
 AQUAPURA_SPLIT_GREEN_ODU_SELECTOR = (0x03, 0xE8)
 AQUAPURA_SPLIT_GREEN_SCHEDULE_SELECTOR = (0x02, 0x58)
+# "Timers/errors" frame (previously captured but unmapped — see module
+# notes). Now known to also carry the heating element enable bit.
+AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR = (0x01, 0x90)
 
 # Which selector serves each of the integration's two polled subtypes.
 _AQUAPURA_SPLIT_GREEN_SUBTYPE_SELECTORS: dict[int, tuple[int, int]] = {
@@ -485,6 +488,12 @@ AQUAPURA_SPLIT_GREEN_OPERATING_MODE_INDEX = 14
 # ``operating_mode`` (Eco/Disparo) — same field table shape as power.
 AQUAPURA_SPLIT_GREEN_SILENCE_INDEX = 17
 
+# TIMERS (01,90) frame body[54] = the heating element enable bit: 0x00 Off,
+# 0x01 On (confirmed by diffing a real ON/OFF capture pair — the ONLY other
+# byte that moved, body[62], is a monotonically increasing counter unrelated
+# to the toggle — see module notes). NOT a STATUS-frame index.
+AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX = 54
+
 # Setpoint range the climate entity clamps to for this profile. No app-
 # confirmed limit capture exists yet; this reuses the KJRH-120L's validated
 # DHW range (issue #35) as a conservative bound wide enough to cover every
@@ -498,6 +507,9 @@ AQUAPURA_SPLIT_GREEN_FIELD_POWER = 0x0B
 AQUAPURA_SPLIT_GREEN_FIELD_OPERATING_MODE = 0x0C
 AQUAPURA_SPLIT_GREEN_FIELD_SETPOINT = 0x0D
 AQUAPURA_SPLIT_GREEN_FIELD_SILENCE = 0x0E
+# Heating element field id — on the TIMERS selector (01,90), not STATUS;
+# field ids are scoped per-selector, so this 0x0E is unrelated to silence's.
+AQUAPURA_SPLIT_GREEN_FIELD_HEATING_ELEMENT = 0x0E
 
 # Operating-mode marker byte -> app label, shared by the live STATUS frame
 # (body[14]) and a daily-schedule slot's mode byte (slot offset +1) — both
@@ -618,20 +630,29 @@ def decode_aquapura_split_green_status(body: bytearray | bytes) -> ITSStatus:
     return status
 
 
-def _build_aquapura_split_green_write(field_id: int, value: bytes) -> str:
+def _build_aquapura_split_green_write(
+    field_id: int, value: bytes,
+    selector: tuple[int, int] = AQUAPURA_SPLIT_GREEN_STATUS_SELECTOR,
+) -> str:
     """Build an Aquapura Split Green write frame for one (field_id, value).
 
-    Shared shape behind every captured write (power, operating mode, DHW
-    setpoint) — see the module notes for the full field table:
+    Shared shape behind every captured single-field write (power, operating
+    mode, DHW setpoint, silence — all on the STATUS selector 01,f4 — and the
+    heating element, on the 01,90 selector) — see the module notes for the
+    full field tables:
 
-        aa <len> c3 00×6 02 00 01 f4 ff ff ff ff 01 ff ff 00
+        aa <len> c3 00×6 02 00 <selector hi> <selector lo> ff ff ff ff 01 ff ff 00
             <field_id> <len(value)> <value...> <cks>
+
+    Field ids are scoped to the selector they're written on, not global — the
+    heating element happens to reuse field id 0x0e on 01,90, unrelated to
+    silence's 0x0e on 01,f4.
     """
     prefix = [
         0xAA, 0x00, 0xC3,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x02, 0x00,
-        0x01, 0xF4,
+        selector[0], selector[1],
         0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0x00,
         field_id, len(value),
     ]
@@ -692,6 +713,36 @@ def build_aquapura_split_green_silence_command(silence_on: bool) -> str:
     return _build_aquapura_split_green_write(
         AQUAPURA_SPLIT_GREEN_FIELD_SILENCE, bytes([0x01 if silence_on else 0x00]),
     )
+
+
+def build_aquapura_split_green_heating_element_command(enabled: bool) -> str:
+    """Return the Aquapura Split Green heating element ON/OFF write command.
+
+    Unlike every other single-field write, this one is on the TIMERS
+    selector (01,90), not STATUS (01,f4). Captured toggling the heating
+    element in the app (mitmproxy); reproduces both captures byte-exact:
+    ``build_aquapura_split_green_heating_element_command(True)``  ->
+      ``aa18c300000000000002000190ffffffff01ffff000e010187``
+    ``build_aquapura_split_green_heating_element_command(False)`` ->
+      ``aa18c300000000000002000190ffffffff01ffff000e010088``
+    """
+    return _build_aquapura_split_green_write(
+        AQUAPURA_SPLIT_GREEN_FIELD_HEATING_ELEMENT,
+        bytes([0x01 if enabled else 0x00]),
+        selector=AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+    )
+
+
+def decode_aquapura_split_green_heating_element(
+    body: bytearray | bytes,
+) -> bool | None:
+    """Decode the heating element enable bit from a Split Green 01,90 frame.
+
+    None if the frame is too short to carry it.
+    """
+    if len(body) <= AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX:
+        return None
+    return body[AQUAPURA_SPLIT_GREEN_HEATING_ELEMENT_INDEX] != 0
 
 
 def build_aquapura_split_green_setpoint_command(temp_c: float) -> str:
@@ -1011,6 +1062,7 @@ __all__ = [
     "AQUAPURA_SPLIT_GREEN_TANK_SELECTOR",
     "AQUAPURA_SPLIT_GREEN_TEMP_MAX",
     "AQUAPURA_SPLIT_GREEN_TEMP_MIN",
+    "AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR",
     "AquapuraSplitGreenDisinfectionSettings",
     "AquapuraSplitGreenScheduleSlot",
     "KJRH120L_DHW_OFF",
@@ -1024,6 +1076,7 @@ __all__ = [
     "build_aquapura_split_green_operating_mode_command",
     "build_aquapura_split_green_power_command",
     "build_aquapura_split_green_disinfection_command",
+    "build_aquapura_split_green_heating_element_command",
     "build_aquapura_split_green_query",
     "build_aquapura_split_green_setpoint_command",
     "build_aquapura_split_green_silence_command",
@@ -1032,6 +1085,7 @@ __all__ = [
     "decode_aquapura_split_green_ambient_temp",
     "decode_aquapura_split_green_daily_schedule",
     "decode_aquapura_split_green_disinfection",
+    "decode_aquapura_split_green_heating_element",
     "decode_aquapura_split_green_sensors",
     "decode_aquapura_split_green_status",
     "decode_aquapura_split_green_tank_temp",

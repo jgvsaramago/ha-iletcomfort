@@ -27,6 +27,7 @@ async def async_setup_entry(
         ILetComfortBoostSwitch(coordinator),
         ILetComfortSilenceSwitch(coordinator),
         ILetComfortDisinfectionSwitch(coordinator),
+        ILetComfortHeatingElementSwitch(coordinator),
     ])
 
 
@@ -150,3 +151,36 @@ class ILetComfortDisinfectionSwitch(
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._async_set(False)
+
+
+class ILetComfortHeatingElementSwitch(
+    CoordinatorEntity[ILetComfortCoordinator], SwitchEntity,
+):
+    """Switch entity for the Aquapura Split Green's electric heating element.
+
+    Lives in the TIMERS (01,90) frame — a separate selector from every other
+    single-field write (all on STATUS, 01,f4). Only that profile's coordinator
+    data ever populates ``coordinator.data["heating_element"]``; every other
+    profile leaves it None, so this reads "off" for them.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Heating Element"
+    _attr_icon = "mdi:radiator"
+
+    def __init__(self, coordinator: ILetComfortCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.appliance_code}_heating_element"
+        self._attr_device_info = build_device_info(coordinator)
+
+    @property
+    def is_on(self) -> bool:
+        if self.coordinator.data is None:
+            return False
+        return bool(self.coordinator.data.get("heating_element"))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_heating_element(enabled=True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_heating_element(enabled=False)

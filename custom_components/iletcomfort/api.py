@@ -865,6 +865,41 @@ class ILetComfortClient:
         response_hex = self.send_hex_command(appliance_code, command)
         return {"sent": command, "response": response_hex, "effective_enabled": enabled}
 
+    def query_heating_element(
+        self, appliance_code: str, sn8: str | None = None,
+    ) -> bool | None:
+        """Query the Aquapura Split Green's heating element enable state.
+
+        Lives in the TIMERS frame (01,90), previously captured but unmapped.
+        Only the Aquapura Split Green (sn8 17186T3A) exposes this frame —
+        every other/unknown sn8 returns None without sending any command.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import (
+            AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+            ModelProfile,
+            decode_aquapura_split_green_heating_element,
+            resolve_profile,
+        )
+
+        if resolve_profile(sn8) is not ModelProfile.AQUAPURA_SPLIT_GREEN:
+            return None
+
+        body = self._query_aquapura_split_green_frame(
+            appliance_code, AQUAPURA_SPLIT_GREEN_TIMERS_SELECTOR,
+        )
+        return decode_aquapura_split_green_heating_element(body)
+
+    def set_heating_element(
+        self, appliance_code: str, *, enabled: bool,
+    ) -> dict[str, Any]:
+        """Send the Aquapura Split Green heating element ON/OFF write command."""
+        from .model_profiles import build_aquapura_split_green_heating_element_command
+
+        command = build_aquapura_split_green_heating_element_command(enabled)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {"sent": command, "response": response_hex, "effective_enabled": enabled}
+
     def _query_aquapura_split_green_frame(
         self, appliance_code: str, selector: tuple[int, int],
     ) -> bytearray:

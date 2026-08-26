@@ -38,6 +38,7 @@ from custom_components.iletcomfort.sensor import (
 from custom_components.iletcomfort.switch import (
     ILetComfortBoostSwitch,
     ILetComfortDisinfectionSwitch,
+    ILetComfortHeatingElementSwitch,
     ILetComfortSilenceSwitch,
 )
 
@@ -78,6 +79,7 @@ def test_all_platforms_share_one_device(hass: HomeAssistant):
         ILetComfortBoostSwitch(coord),
         ILetComfortSilenceSwitch(coord),
         ILetComfortDisinfectionSwitch(coord),
+        ILetComfortHeatingElementSwitch(coord),
         ILetComfortMuteSelect(coord),
     ]
 
@@ -373,6 +375,7 @@ async def test_full_integration_setup_adds_every_entity_without_error(
         client.query_disinfection.return_value = AquapuraSplitGreenDisinfectionSettings(
             enabled=True, hour=14, minute=0, temperature=65.0, cycle_days=7,
         )
+        client.query_heating_element.return_value = True
 
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -384,5 +387,6 @@ async def test_full_integration_setup_adds_every_entity_without_error(
     entity_ids = hass.states.async_entity_ids()
     assert any("daily_schedule_1_setpoint" in e for e in entity_ids)
     assert any("daily_schedule_1_active" in e for e in entity_ids)
+    assert any(e.startswith("switch.") and "heating_element" in e for e in entity_ids)
     assert any("disinfection_temperature" in e for e in entity_ids)
     assert any(e.startswith("switch.") and "disinfection" in e for e in entity_ids)
