@@ -62,6 +62,16 @@ SUSTAINED_FAILURE_THRESHOLD = 5
 # DataUpdateCoordinator or a user-facing setting.
 CONFIG_FETCH_INTERVAL = timedelta(minutes=5)
 
+# How long to wait after a schedule-slot activate/deactivate write before
+# refetching it. Refreshing immediately raced the device: a query fired
+# right after the write could still read back the pre-write value, making
+# the switch flip to the old state for a couple of seconds before a later
+# poll caught the real one (reported: settled correctly within ~5s on its
+# own). Not app-confirmed as the device's exact commit latency — a
+# conservative starting value based on that report; raise it if the
+# flicker is still reproducible.
+SCHEDULE_WRITE_SETTLE_SECONDS = 3
+
 
 class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls the iLetComfort cloud API."""
@@ -547,6 +557,15 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Forces the next poll to refetch the daily schedule immediately,
         bypassing CONFIG_FETCH_INTERVAL — otherwise a switch flipped here
         could keep reading its pre-write state for up to 5 minutes.
+
+        The device needs a moment after accepting the write before a
+        subsequent query actually reflects it — refreshing immediately
+        raced that and read back the pre-write value, making the switch
+        flip to the old state for a couple of seconds before a later poll
+        (60s timer or another manual toggle) finally caught the real one.
+        This mirrors the existing 2s pacing between the status and sensors
+        queries in ``_poll()``, just applied here for the same reason:
+        giving the device time to settle before reading it back.
         """
         try:
             await self.hass.async_add_executor_job(
@@ -558,5 +577,6 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.hass.async_add_executor_job(
                 lambda: self.client.set_schedule_active(self.appliance_code, **kwargs)
             )
+        await asyncio.sleep(SCHEDULE_WRITE_SETTLE_SECONDS)
         self._last_config_fetch = None
         await self.async_request_refresh()

@@ -23,6 +23,7 @@ from custom_components.iletcomfort.const import (
 )
 from custom_components.iletcomfort.coordinator import (
     CONFIG_FETCH_INTERVAL,
+    SCHEDULE_WRITE_SETTLE_SECONDS,
     OFFLINE_REPAIR_ID,
     OFFLINE_REPAIR_THRESHOLD,
     SUSTAINED_FAILURE_THRESHOLD,
@@ -904,10 +905,15 @@ async def test_async_set_schedule_active_forwards_to_client_and_forces_refetch(
     coord.async_request_refresh = AsyncMock()
     coord._last_config_fetch = dt_util.utcnow()
 
-    await coord.async_set_schedule_active(slot=2, enabled=True)
+    with patch(
+        "custom_components.iletcomfort.coordinator.asyncio.sleep",
+        new=AsyncMock(),
+    ) as mock_sleep:
+        await coord.async_set_schedule_active(slot=2, enabled=True)
 
     assert client.set_schedule_active.call_args.args == ("APPL1",)
     assert client.set_schedule_active.call_args.kwargs == {"slot": 2, "enabled": True}
+    mock_sleep.assert_awaited_once_with(SCHEDULE_WRITE_SETTLE_SECONDS)
     assert coord._last_config_fetch is None
     coord.async_request_refresh.assert_awaited_once()
 
