@@ -22,6 +22,8 @@ from __future__ import annotations
 import pytest
 
 from custom_components.iletcomfort.api import (
+    MODE_HEAT,
+    MODE_OFF,
     ApiError,
     ILetComfortClient,
     build_c3_query,
@@ -42,6 +44,7 @@ from custom_components.iletcomfort.model_profiles import (
     ModelProfile,
     apply_profile_to_sensors,
     apply_profile_to_status,
+    build_aquapura_split_green_power_command,
     build_aquapura_split_green_query,
     build_kjrh120l_set_temperature,
     build_query_command,
@@ -514,14 +517,30 @@ AQUAPURA_SPLIT_GREEN_QUERY_COMMANDS = {
 }
 
 # Real STATUS (selector 0x01,0xf4) response frame, complete as captured. The app
-# showed setpoint 50 °C → raw idx37 = body[27] = 0x32. This frame is BYTE-
-# IDENTICAL in captures A and B — both were taken with the unit off, which is
-# why no power/mode byte can be pinned yet.
+# showed setpoint 50 °C → raw idx37 = body[27] = 0x32. This particular capture is
+# from an OFF unit (body[13] = raw idx23 = 0x00); see the ON/OFF pair below for
+# the power-bit confirmation.
 AQUAPURA_SPLIT_GREEN_STATUS_RAW = _bytes(
     "aa,2e,c3,00,00,00,00,00,00,03,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
     "00,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
 )
 AQUAPURA_SPLIT_GREEN_STATUS_BODY = AQUAPURA_SPLIT_GREEN_STATUS_RAW[10:-1]
+
+# Real ON/OFF SET request + response pair, captured toggling power in the app
+# (mitmproxy). The responses are the STATUS (01,f4) frame; diffing them shows
+# body[13] (raw idx23) is the ONLY byte that changes — the power bit.
+AQUAPURA_SPLIT_GREEN_POWER_ON_COMMAND = "aa18c3000000000000020001f4ffffffff01ffff000b010126"
+AQUAPURA_SPLIT_GREEN_POWER_OFF_COMMAND = "aa18c3000000000000020001f4ffffffff01ffff000b010027"
+AQUAPURA_SPLIT_GREEN_STATUS_ON_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "01,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,15"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_OFF_RAW = _bytes(
+    "aa,2e,c3,00,00,00,00,00,00,02,00,01,f4,ff,ff,83,ff,00,ff,ff,ff,15,ff,"
+    "00,40,02,08,00,ff,ff,01,ff,ff,00,ff,00,00,32,ff,ff,ff,ff,ff,ff,ff,00,16"
+)
+AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY = AQUAPURA_SPLIT_GREEN_STATUS_ON_RAW[10:-1]
+AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY = AQUAPURA_SPLIT_GREEN_STATUS_OFF_RAW[10:-1]
 
 # Real TANK (selector 0x03,0x84) response frame from capture B, complete as
 # captured: raw idx40:41 = 0x01e7 = 48.7 °C, app showed 48.
@@ -615,18 +634,51 @@ def test_aquapura_split_green_status_setpoint_tracks_body27():
     assert status.set_temperature == 55
 
 
-def test_aquapura_split_green_status_power_and_mode_not_guessed():
-    """Power/mode stays unreported until a RUNNING capture pins the flag byte.
-
-    The captured frame is from an OFF unit, so the candidate flag bytes
-    (body[14]=0x40, body[15]=0x02, body[16]=0x08, body[20]=0x01) cannot be told
-    apart. Reporting a guessed mode would be worse than reporting none, so the
-    decode leaves mode at 0/"Off" and comp_running False.
-    """
+def test_aquapura_split_green_status_power_off_from_body13():
+    """The baseline (OFF) capture decodes to mode 0/"Off"."""
     status = decode_aquapura_split_green_status(AQUAPURA_SPLIT_GREEN_STATUS_BODY)
     assert status.mode == 0
     assert status.mode_name == "Off"
     assert status.comp_running is False
+
+
+def test_aquapura_split_green_status_power_on_off_from_real_capture_pair():
+    """body[13] (raw idx23) is confirmed as the power bit by a real ON/OFF pair.
+
+    Diffing the two response frames (captured toggling power in the app) shows
+    it is the ONLY byte that changes — the four earlier "candidate" bytes
+    (body[14]=0x40, body[15]=0x02, body[16]=0x08, body[20]=0x01) are identical
+    in both and are NOT the power bit.
+    """
+    on_status = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY,
+    )
+    off_status = decode_aquapura_split_green_status(
+        AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY,
+    )
+
+    assert AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY[13] == 0x01
+    assert AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY[13] == 0x00
+    assert on_status.mode == 1
+    assert on_status.mode_name == "Heat"
+    assert off_status.mode == 0
+    assert off_status.mode_name == "Off"
+
+    # The two response bodies differ ONLY at body[13] — the setpoint and every
+    # other byte the decode reads is untouched by the power state.
+    diffs = [
+        i for i in range(len(AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY))
+        if AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY[i]
+        != AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY[i]
+    ]
+    assert diffs == [13]
+    assert on_status.t5s_def == off_status.t5s_def == 50.0
+
+
+def test_aquapura_split_green_status_power_byte_is_body13():
+    """Sanity check pinning the exact index (regression against re-indexing)."""
+    assert AQUAPURA_SPLIT_GREEN_STATUS_ON_BODY[13] == 0x01
+    assert AQUAPURA_SPLIT_GREEN_STATUS_OFF_BODY[13] == 0x00
 
 
 def test_aquapura_split_green_status_suppresses_standard_garbage():
@@ -977,11 +1029,13 @@ def test_query_daily_schedule_other_profiles_send_no_command():
     send.assert_not_called()
 
 
-def test_aquapura_split_green_set_device_refuses_instead_of_sending_garbage():
-    """Writes are refused for the Split Green: no SET frame has been captured yet.
+def test_aquapura_split_green_set_device_temperature_refuses_instead_of_sending_garbage():
+    """Setpoint writes are refused: no setpoint SET frame has been captured yet.
 
     The legacy SET path builds its frame from a status query this model does not
     answer, so it would send a frame assembled from garbage. Fail loudly instead.
+    Power on/off IS captured and must not be blocked by this same guard — see
+    test_aquapura_split_green_set_device_sends_captured_power_command below.
     """
     client = _make_client()
     with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_RAW.hex()) as send:
@@ -989,6 +1043,53 @@ def test_aquapura_split_green_set_device_refuses_instead_of_sending_garbage():
             client.set_device("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, temperature=50)
 
     send.assert_not_called()
+
+
+def test_aquapura_split_green_set_device_sends_captured_power_command():
+    """set_device sends the real captured ON/OFF command, not a guess.
+
+    mode != MODE_OFF (climate.async_set_hvac_mode) and power_on=True
+    (climate.async_turn_on) must both resolve to the ON command; mode ==
+    MODE_OFF (climate.async_turn_off) resolves to the OFF command — mirroring
+    how climate.py actually calls async_set_device for this profile.
+    """
+    client = _make_client()
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_ON_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, power_on=True,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_POWER_ON_COMMAND,
+    )
+    assert result["effective_power"] is True
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_ON_RAW.hex()) as send:
+        client.set_device("APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, mode=MODE_HEAT)
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_POWER_ON_COMMAND,
+    )
+
+    with patch_send(client, AQUAPURA_SPLIT_GREEN_STATUS_OFF_RAW.hex()) as send:
+        result = client.set_device(
+            "APPL1", sn8=AQUAPURA_SPLIT_GREEN_SN8, mode=MODE_OFF,
+        )
+    send.assert_called_once_with(
+        "APPL1", AQUAPURA_SPLIT_GREEN_POWER_OFF_COMMAND,
+    )
+    assert result["effective_power"] is False
+
+
+def test_build_aquapura_split_green_power_command_matches_captured_commands():
+    """Both captured commands are reproduced byte-exact, checksum included."""
+    assert (
+        build_aquapura_split_green_power_command(True)
+        == AQUAPURA_SPLIT_GREEN_POWER_ON_COMMAND
+    )
+    assert (
+        build_aquapura_split_green_power_command(False)
+        == AQUAPURA_SPLIT_GREEN_POWER_OFF_COMMAND
+    )
 
 
 # ---------------------------------------------------------------------------

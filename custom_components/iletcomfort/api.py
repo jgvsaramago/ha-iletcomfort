@@ -875,10 +875,11 @@ class ILetComfortClient:
         ``sn8`` selects the write encoding per model. The KJRH-120L (sn8
         17100003) rejects the standard 62-byte C3 SET frame, so for that profile
         a captured short write command (``00 <field> 01 <value> ff``) is sent
-        directly. The Aquapura Split Green (sn8 17186T3A) is read-only for now: no SET
-        command has been captured for it, and the legacy path below would build
-        its frame from a status query that model does not answer, so writes are
-        refused rather than sent as garbage. Every other
+        directly. The Aquapura Split Green (sn8 17186T3A) has a captured power
+        ON/OFF write but no captured setpoint write yet, so only power control
+        works for it — a temperature change still raises rather than sending a
+        frame assembled from garbage (the legacy path below builds its frame
+        from a status query this model does not answer). Every other
         (unknown/None/ATW/AQUAPURA) sn8 keeps the legacy build_c3_set path
         unchanged: query current status for echo bytes, merge the requested
         changes, validate temperature ranges, build and send the SET frame.
@@ -895,11 +896,11 @@ class ILetComfortClient:
                 power_on=power_on,
             )
         if profile is ModelProfile.AQUAPURA_SPLIT_GREEN:
-            raise ApiError(
-                "Control commands are not supported yet for the Aquapura Split Green "
-                "(sn8 17186T3A): this model needs its own write frames, which "
-                "have not been captured from the official app. Reads "
-                "(temperature, setpoint) work."
+            return self._set_device_aquapura_split_green(
+                appliance_code,
+                mode=mode,
+                temperature=temperature,
+                power_on=power_on,
             )
 
         # Query current status for echo bytes
@@ -1012,3 +1013,39 @@ class ILetComfortClient:
 
         response_hex = self.send_hex_command(appliance_code, command)
         return {"sent": command, "response": response_hex, **effective}
+
+    def _set_device_aquapura_split_green(
+        self,
+        appliance_code: str,
+        *,
+        mode: int | None,
+        temperature: int | None,
+        power_on: bool,
+    ) -> dict[str, Any]:
+        """Send an Aquapura Split Green (sn8 17186T3A) power ON/OFF command.
+
+        Only power control is captured for this model (a real ON/OFF request +
+        response pair, see model_profiles). A temperature change is refused
+        rather than guessed: no DHW-setpoint SET frame has been captured yet,
+        and the legacy 62-byte C3 SET frame is built from a status query this
+        device does not answer.
+        """
+        # Imported lazily to avoid a circular import (model_profiles imports api).
+        from .model_profiles import build_aquapura_split_green_power_command
+
+        if temperature is not None:
+            raise ApiError(
+                "Changing the DHW setpoint is not supported yet for the "
+                "Aquapura Split Green (sn8 17186T3A): no setpoint write "
+                "command has been captured from the official app. Turning "
+                "the unit on/off works."
+            )
+
+        power = power_on or (mode is not None and mode != MODE_OFF)
+        command = build_aquapura_split_green_power_command(power)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {
+            "sent": command,
+            "response": response_hex,
+            "effective_power": power,
+        }

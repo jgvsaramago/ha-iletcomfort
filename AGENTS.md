@@ -156,13 +156,31 @@ device (matches the KJRH-120L-suppressed-temps precedent): value_fns index into 
 return `None`/`False` when the slot/list is absent, so non-Split-Green devices just show them
 unknown/off rather than needing profile-conditional entity registration.
 
-**Still not decoded:**
-1. **Power/mode**: both captures are from an OFF unit and their STATUS frames are **byte-identical**, so
-   the candidate flag bytes (body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) still
-   can't be told apart. `mode` stays 0/"Off" until a **RUNNING** capture shows which byte flips.
-2. **Writes**: no SET command captured. `set_device` **raises a clear ApiError** for this profile
-   rather than building the legacy 62-byte frame from a status query the device doesn't answer.
-3. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
+**Power/mode — confirmed.** A real ON/OFF mitmproxy capture pair (SET request + STATUS response, both
+states) pins **STATUS body[13]** (raw idx23) as the power bit (`0x00`=Off, `0x01`=On); diffing the two
+response frames shows it's the **only** byte that changes. The four originally-suspected candidates
+(body[14]=`0x40`, body[15]=`0x02`, body[16]=`0x08`, body[20]=`0x01`) are constant across Off/On and were a
+mis-index from a single-capture guess. `mode` is reported 0/"Off" or 1/"Heat" (same convention as
+KJRH-120L: query mode 1 → `HVACMode.HEAT` in climate.py, a non-off state, making the card read ON and the
+Off button usable).
+
+**Power writes — confirmed.** The captured SET frame (both states, byte-identical apart from the power
+byte and checksum):
+
+    aa 18 c3 00 00 00 00 00 00 02 00 01 f4 ff ff ff ff 01 ff ff 00 0b 01 <pwr> <cks>
+
+`<pwr>` = `0x01`/`0x00`; same checksum formula as the query frames. `build_aquapura_split_green_power_command`
+reproduces both captures byte-exact. Note header[9] = `0x02` here (a SET/control request) vs `0x03` for a
+plain query — this also explains an earlier oddity: a schedule-frame capture taken right after an app
+write also had raw[9]=`0x02`, most likely echoing "this exchange involved a write", not a data field.
+`api.py`'s `_set_device_aquapura_split_green` wires this in: `power_on=True` or any non-off `mode` → ON
+command, `mode=MODE_OFF` → OFF command (mirrors `_set_device_kjrh120l`'s priority logic).
+
+**Still not decoded / not writable:**
+1. **Setpoint writes**: no SET command for the DHW setpoint has been captured (only power on/off).
+   `set_device` still **raises a clear ApiError** for a temperature change on this profile, rather than
+   building the legacy 62-byte frame from a status query the device doesn't answer.
+2. The ODU frame's other sensors and the config frame's (`00,64`) limits are real data with no app label
    to validate against — left unmapped rather than guessed.
 
 ### AQUAPURA profile (`sn8 171000AU`, AQS Energie split HPWH, #12)
